@@ -1,9 +1,10 @@
+
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { parseCSV } from '../utils/csvParser';
 import { DEFAULT_CSV, PDU_VARIANTS } from '../constants';
 import RackVisualizer from './RackVisualizer';
 import { Device, PSUConnection, SocketType, PDUConfig } from '../types';
-import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw } from 'lucide-react';
+import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 
@@ -34,6 +35,8 @@ const Dashboard: React.FC = () => {
   const [secondarySocketsPerPDU, setSecondarySocketsPerPDU] = useState(4);
   const [tempSecondarySockets, setTempSecondarySockets] = useState<number | string>(4);
 
+  const [manualPduPairs, setManualPduPairs] = useState<number | null>(null);
+
   const [pduPhysicalHeight, setPduPhysicalHeight] = useState<number>(180); // cm
   const [pduPhysicalWidth, setPduPhysicalWidth] = useState<number>(5.5); // cm
   const [pduCordLength, setPduCordLength] = useState<number>(3); // meters
@@ -55,19 +58,20 @@ const Dashboard: React.FC = () => {
   const [showExportMenu, setShowExportMenu] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const configInputRef = useRef<HTMLInputElement>(null);
   const visualizerRef = useRef<HTMLDivElement>(null);
 
   // --- Logic to Calculate Required PDUs ---
   
-  const requiredPduPairs = useMemo(() => {
+  const calculatedPduPairs = useMemo(() => {
     const totalMaxPower = activeDevices.reduce((sum, d) => sum + d.powerRatingPerDevice, 0);
     const totalPSUs = activeDevices.reduce((sum, d) => sum + d.psuCount, 0);
     
     // Effective capacity per side (A or B) taking redundancy into account.
     const effectiveCapacity = basePduCapacity * powerFactor * (safetyMargin / 100);
     
-    // Power Requirement (Ceil) -> Added 15% buffer for bin-packing inefficiencies
-    const pairsByPower = Math.ceil((totalMaxPower * 1.15) / effectiveCapacity);
+    // Power Requirement (Ceil) - Removed buffer
+    const pairsByPower = Math.ceil(totalMaxPower / effectiveCapacity);
     
     // Socket Requirement (Total sockets = base + secondary)
     const totalSocketsPerPDU = baseSocketsPerPDU + secondarySocketsPerPDU;
@@ -76,10 +80,12 @@ const Dashboard: React.FC = () => {
     return Math.max(1, pairsByPower, pairsBySockets);
   }, [activeDevices, basePduCapacity, powerFactor, safetyMargin, baseSocketsPerPDU, secondarySocketsPerPDU]);
 
+  const activePduPairs = manualPduPairs !== null ? manualPduPairs : calculatedPduPairs;
+
   // Generate the PDU Definitions based on the calculated requirement
   const pdus: PDUConfig[] = useMemo(() => {
     const list: PDUConfig[] = [];
-    for (let i = 0; i < requiredPduPairs; i++) {
+    for (let i = 0; i < activePduPairs; i++) {
         const configA: PDUConfig = {
             id: `A${i+1}`,
             side: 'A',
@@ -104,11 +110,18 @@ const Dashboard: React.FC = () => {
         list.push(configB);
     }
     return list;
-  }, [requiredPduPairs, baseSocketsPerPDU, secondarySocketsPerPDU, basePduCapacity, socketType, secondarySocketType]);
+  }, [activePduPairs, baseSocketsPerPDU, secondarySocketsPerPDU, basePduCapacity, socketType, secondarySocketType]);
 
 
-  // Helper: Get geometric center Y of a PDU pair
-  const getPduCenterY = (index: number, numPairs: number, totalSocketsPerPDU: number, rackSizeU: number) => {
+  // Helper: Get geometric Y position of a socket on a PDU
+  // Used to find closest socket to device
+  const getPDUSocketY = (
+      pduIndex: number, 
+      socketIndex: number, 
+      numPairs: number, 
+      totalSocketsPerPDU: number, 
+      rackSizeU: number
+  ) => {
       const getPDUHeight = (socketCount: number) => {
           const contentH = (socketCount * SOCKET_H) + ((socketCount - 1) * SOCKET_GAP);
           return PDU_HEADER_H + SOCKET_PADDING + contentH + SOCKET_PADDING + PDU_FOOTER_H;
@@ -119,11 +132,298 @@ const Dashboard: React.FC = () => {
       const rackHeightPx = (rackSizeU * U_HEIGHT_PX) + (RACK_HEADER_HEIGHT * 2);
       const startY = Math.max(0, (rackHeightPx - totalGroupHeight) / 2);
 
-      const y = startY + index * (singlePduHeight + PDU_VERTICAL_GAP);
-      return y + (singlePduHeight / 2);
+      const pduTopY = startY + pduIndex * (singlePduHeight + PDU_VERTICAL_GAP);
+      const socketOffset = PDU_HEADER_H + SOCKET_PADDING + (socketIndex * (SOCKET_H + SOCKET_GAP)) + (SOCKET_H / 2);
+      
+      return pduTopY + socketOffset;
+  };
+
+  const optimizeWiring = (
+    devices: Device[], 
+    baseSockets: number
+  ) => {
+    // 1. Build a map of PDU -> list of { deviceId, psuIndex, uPos, socketIndex }
+    const pduMap: Record<string, { deviceId: string, psuIndex: number, uPos: number, socketIndex: number }[]> = {};
+
+    devices.forEach(d => {
+        if (!d.uPosition) return;
+        Object.entries(d.psuConnections).forEach(([psuIdxStr, conn]) => {
+            const c = conn as PSUConnection | null;
+            if (c) {
+                if (!pduMap[c.pduId]) pduMap[c.pduId] = [];
+                pduMap[c.pduId].push({
+                    deviceId: d.id,
+                    psuIndex: parseInt(psuIdxStr),
+                    uPos: d.uPosition!, 
+                    socketIndex: c.socketIndex
+                });
+            }
+        });
+    });
+
+    // 2. For each PDU, sort and re-assign
+    Object.keys(pduMap).forEach(pduId => {
+        const conns = pduMap[pduId];
+        
+        // Split into Primary (0..base-1) and Secondary (base..total-1)
+        // based on where they were *originally* placed (which respects type constraints).
+        const primaryConns = conns.filter(c => c.socketIndex < baseSockets);
+        const secondaryConns = conns.filter(c => c.socketIndex >= baseSockets);
+
+        // Sort by U Position Descending (Top devices first)
+        // If U positions equal, use original socket index to maintain stability
+        const sortFn = (a: any, b: any) => {
+            if (b.uPos !== a.uPos) return b.uPos - a.uPos;
+            return a.socketIndex - b.socketIndex;
+        };
+
+        primaryConns.sort(sortFn);
+        secondaryConns.sort(sortFn);
+
+        // Get the actual available socket slots that were used
+        const usedPrimarySockets = primaryConns.map(c => c.socketIndex).sort((a, b) => a - b);
+        const usedSecondarySockets = secondaryConns.map(c => c.socketIndex).sort((a, b) => a - b);
+
+        // Re-map: Connection N gets Socket N
+        primaryConns.forEach((c, i) => {
+             c.socketIndex = usedPrimarySockets[i]; 
+        });
+        secondaryConns.forEach((c, i) => {
+             c.socketIndex = usedSecondarySockets[i];
+        });
+    });
+
+    // 3. Reconstruct devices array with new assignments
+    const changes = new Map<string, Map<number, {pduId: string, socketIndex: number}>>();
+    
+    Object.entries(pduMap).forEach(([pduId, conns]) => {
+        conns.forEach(c => {
+            if (!changes.has(c.deviceId)) changes.set(c.deviceId, new Map());
+            changes.get(c.deviceId)!.set(c.psuIndex, { pduId, socketIndex: c.socketIndex });
+        });
+    });
+
+    return devices.map(d => {
+        if (!changes.has(d.id)) return d;
+        
+        const newPsuConns = { ...d.psuConnections };
+        const deviceChanges = changes.get(d.id)!;
+        
+        deviceChanges.forEach((newConn, psuIdx) => {
+            newPsuConns[psuIdx] = newConn;
+        });
+
+        return { ...d, psuConnections: newPsuConns };
+    });
+  };
+
+  // Helper: Shared Logic for Auto-Wiring
+  const runAutoConnect = (
+    devicesToProcess: Device[], 
+    pduState: Record<string, { currentLoad: number, usedSockets: Set<number>, id: string, index: number }>,
+    numPairs: number,
+    effectiveCap: number,
+    totalSocketsPerPDU: number
+  ) => {
+    
+    // Sort devices by U Position (Descending)
+    const sortedDevices = [...devicesToProcess].sort((a, b) => {
+        if (!a.uPosition && !b.uPosition) return 0;
+        if (!a.uPosition) return 1;
+        if (!b.uPosition) return -1;
+        return b.uPosition - a.uPosition;
+    });
+
+    // Separation: Dual PSU vs Single/Other
+    const dualPSUDevices = sortedDevices.filter(d => d.psuCount === 2);
+    const otherDevices = sortedDevices.filter(d => d.psuCount !== 2);
+
+    const processedDevices: Device[] = [];
+
+    // --- PHASE 1: DUAL PSU DEVICES (Try to match sockets on A & B) ---
+    for (const d of dualPSUDevices) {
+        if (!d.uPosition) {
+            processedDevices.push({ ...d, psuConnections: {} });
+            continue;
+        }
+
+        const newConns: any = {};
+        const uPos = d.uPosition; 
+        const topPx = RACK_HEADER_HEIGHT + ((rackSize - uPos) * U_HEIGHT_PX);
+        const deviceCenterY = topPx + ((d.uHeight * U_HEIGHT_PX) / 2);
+        const loadToAdd = d.powerRatingPerDevice; 
+
+        // Try to find a matched pair (A1+B1, A2+B2...)
+        let assigned = false;
+        
+        // Iterate PDU Pairs (0, 1, 2...)
+        for (let k = 0; k < numPairs; k++) {
+            const pduA = pduState[`A${k+1}`];
+            const pduB = pduState[`B${k+1}`];
+
+            if (pduA.currentLoad + loadToAdd <= effectiveCap && pduB.currentLoad + loadToAdd <= effectiveCap) {
+                // Find best shared socket index
+                let bestSocket = -1;
+                let shortestDist = Infinity;
+
+                for (let s = 0; s < totalSocketsPerPDU; s++) {
+                    // Must be free on BOTH
+                    if (!pduA.usedSockets.has(s) && !pduB.usedSockets.has(s)) {
+                         // Check Type
+                         const isSecondary = s >= baseSocketsPerPDU;
+                         const currentSocketType = isSecondary ? secondarySocketType : socketType;
+                         if (currentSocketType !== d.connectionType) continue;
+
+                         const sY = getPDUSocketY(k, s, numPairs, totalSocketsPerPDU, rackSize);
+                         const dist = Math.abs(sY - deviceCenterY);
+                         
+                         if (dist < shortestDist) {
+                             shortestDist = dist;
+                             bestSocket = s;
+                         }
+                    }
+                }
+
+                if (bestSocket !== -1) {
+                    // Assign to Matched Pair
+                    newConns[0] = { pduId: pduA.id, socketIndex: bestSocket };
+                    newConns[1] = { pduId: pduB.id, socketIndex: bestSocket };
+                    
+                    pduA.usedSockets.add(bestSocket);
+                    pduA.currentLoad += loadToAdd;
+                    pduB.usedSockets.add(bestSocket);
+                    pduB.currentLoad += loadToAdd; // Assuming active/active or worst case failover calculation
+                    
+                    assigned = true;
+                    break;
+                }
+            }
+        }
+
+        // Fallback: If no matched pair found, assign individually using standard logic
+        if (!assigned) {
+             for(let i=0; i<d.psuCount; i++) {
+                // 0 -> A, 1 -> B
+                const side = i === 0 ? 'A' : 'B';
+                let socketAssigned = false;
+                
+                // Sort candidates by index
+                const candidates = [];
+                for(let k=0; k<numPairs; k++) candidates.push(pduState[`${side}${k+1}`]);
+                candidates.sort((a,b) => a.index - b.index);
+
+                for (const pdu of candidates) {
+                    if (pdu.currentLoad + loadToAdd <= effectiveCap) {
+                        let bestSocket = -1;
+                        let shortestDist = Infinity;
+
+                        for(let s=0; s < totalSocketsPerPDU; s++) {
+                            if (!pdu.usedSockets.has(s)) {
+                                 const isSecondary = s >= baseSocketsPerPDU;
+                                 const currentSocketType = isSecondary ? secondarySocketType : socketType;
+                                 if (currentSocketType !== d.connectionType) continue;
+
+                                 const sY = getPDUSocketY(pdu.index, s, numPairs, totalSocketsPerPDU, rackSize);
+                                 const dist = Math.abs(sY - deviceCenterY);
+                                 if (dist < shortestDist) {
+                                     shortestDist = dist;
+                                     bestSocket = s;
+                                 }
+                            }
+                        }
+
+                        if (bestSocket !== -1) {
+                            newConns[i] = { pduId: pdu.id, socketIndex: bestSocket };
+                            pdu.usedSockets.add(bestSocket);
+                            pdu.currentLoad += loadToAdd;
+                            socketAssigned = true;
+                            break;
+                        }
+                    }
+                }
+                if (!socketAssigned) newConns[i] = null;
+             }
+        }
+
+        const updated = { ...d, psuConnections: newConns };
+        processedDevices.push(updated);
+    }
+
+    // --- PHASE 2: SINGLE / ODD PSU DEVICES ---
+    let singlePsuRoundRobin = 0;
+    
+    for (const d of otherDevices) {
+        if (!d.uPosition) {
+            processedDevices.push({ ...d, psuConnections: {} });
+            continue;
+        }
+
+        const newConns: any = {};
+        const uPos = d.uPosition; 
+        const topPx = RACK_HEADER_HEIGHT + ((rackSize - uPos) * U_HEIGHT_PX);
+        const deviceCenterY = topPx + ((d.uHeight * U_HEIGHT_PX) / 2);
+        const loadToAdd = d.powerRatingPerDevice; 
+
+        for(let i=0; i<d.psuCount; i++) {
+            let side: 'A' | 'B';
+            // Round robin for single, A/B for multi-odd
+            if (d.psuCount === 1) {
+                side = singlePsuRoundRobin % 2 === 0 ? 'A' : 'B';
+                singlePsuRoundRobin++;
+            } else {
+                side = i % 2 === 0 ? 'A' : 'B';
+            }
+            
+            const candidates = [];
+            for(let k=0; k<numPairs; k++) {
+                candidates.push(pduState[`${side}${k+1}`]);
+            }
+            candidates.sort((a, b) => a.index - b.index);
+            
+            let assigned = false;
+            for (const pdu of candidates) {
+                if (pdu.currentLoad + loadToAdd <= effectiveCap) {
+                      let bestSocket = -1;
+                      let shortestDist = Infinity;
+
+                      for(let s=0; s < totalSocketsPerPDU; s++) {
+                          if (!pdu.usedSockets.has(s)) {
+                               const isSecondary = s >= baseSocketsPerPDU;
+                               const currentSocketType = isSecondary ? secondarySocketType : socketType;
+                               if (currentSocketType !== d.connectionType) continue;
+
+                               const sY = getPDUSocketY(pdu.index, s, numPairs, totalSocketsPerPDU, rackSize);
+                               const dist = Math.abs(sY - deviceCenterY);
+                               if (dist < shortestDist) {
+                                   shortestDist = dist;
+                                   bestSocket = s;
+                               }
+                          }
+                      }
+
+                      if (bestSocket !== -1) {
+                          newConns[i] = { pduId: pdu.id, socketIndex: bestSocket };
+                          pdu.usedSockets.add(bestSocket);
+                          pdu.currentLoad += loadToAdd;
+                          assigned = true;
+                          break;
+                      }
+                }
+            }
+            if (!assigned) newConns[i] = null;
+        }
+        
+        const updated = { ...d, psuConnections: newConns };
+        processedDevices.push(updated);
+    }
+
+    // POST-PROCESSING: Optimize Wiring to Minimize Overlapping
+    return optimizeWiring(processedDevices, baseSocketsPerPDU);
   };
 
   // Initial Load & Auto-Patching when CSV changes
+  // IMPORTANT: Only run when csvInput changes. Do NOT run when config changes (rackSize, etc.)
+  // or it will overwrite loaded JSON configurations.
   useEffect(() => {
     const groups = parseCSV(csvInput);
     if (groups.length > 0) {
@@ -136,29 +436,29 @@ const Dashboard: React.FC = () => {
       const totalMaxPower = devices.reduce((sum, d) => sum + d.powerRatingPerDevice, 0);
       const totalPSUs = devices.reduce((sum, d) => sum + d.psuCount, 0);
       
-      const pairsByPower = Math.ceil((totalMaxPower * 1.15) / effectiveCap);
+      // Removed buffer for estimation as well
+      const pairsByPower = Math.ceil(totalMaxPower / effectiveCap);
       const pairsBySockets = Math.ceil((totalPSUs / 2) / totalSocketsPerPDU);
-      const numPairs = Math.max(1, pairsByPower, pairsBySockets);
+      // Use manual count if available, otherwise calculated
+      const calculatedPairs = Math.max(1, pairsByPower, pairsBySockets);
+      const numPairs = manualPduPairs !== null ? manualPduPairs : calculatedPairs;
 
-      // 2. Initialize PDU State with geometric info
+      // 2. Initialize PDU State
       const pduState: Record<string, { 
           currentLoad: number, 
-          nextSocket: number, 
-          centerY: number,
-          id: string
+          usedSockets: Set<number>, 
+          id: string,
+          index: number
       }> = {};
       
       for(let i=0; i < numPairs; i++) {
-          const cy = getPduCenterY(i, numPairs, totalSocketsPerPDU, rackSize);
-          pduState[`A${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `A${i+1}` };
-          pduState[`B${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `B${i+1}` };
+          pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i };
+          pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i };
       }
 
-      // 3. Assign Devices (Auto-Patch to Closest)
-      // Adjust positions for CSV import based on rack size (simple stack down from top)
+      // 3. Position Devices in Rack (Stack Logic)
       let currentU = rackSize;
       const positionedDevices = devices.map(d => {
-           // We are re-stacking here to ensure it fits the new rack size
            if (currentU - d.uHeight + 1 >= 1) {
                 const pos = currentU;
                 currentU -= d.uHeight;
@@ -167,56 +467,13 @@ const Dashboard: React.FC = () => {
            return { ...d, uPosition: null };
       });
 
-      const finalDevices = positionedDevices.map(d => {
-          const newConns: any = {};
-          
-          if (!d.uPosition) return { ...d, psuConnections: {} };
-
-          const uPos = d.uPosition; 
-          const topPx = RACK_HEADER_HEIGHT + ((rackSize - uPos) * U_HEIGHT_PX);
-          const deviceCenterY = topPx + ((d.uHeight * U_HEIGHT_PX) / 2);
-
-          const loadToAdd = d.powerRatingPerDevice; 
-
-          for(let i=0; i<d.psuCount; i++) {
-              const isEven = i % 2 === 0;
-              const side = isEven ? 'A' : 'B';
-              
-              const candidates = [];
-              for(let k=0; k<numPairs; k++) {
-                  candidates.push(pduState[`${side}${k+1}`]);
-              }
-
-              // Sort by distance
-              candidates.sort((a, b) => Math.abs(a.centerY - deviceCenterY) - Math.abs(b.centerY - deviceCenterY));
-              
-              let assigned = false;
-              for (const pdu of candidates) {
-                  // Check limits (Total sockets)
-                  if (pdu.nextSocket < totalSocketsPerPDU && pdu.currentLoad + loadToAdd <= effectiveCap) {
-                      newConns[i] = {
-                          pduId: pdu.id,
-                          socketIndex: pdu.nextSocket
-                      };
-                      
-                      pdu.nextSocket++;
-                      pdu.currentLoad += loadToAdd;
-                      assigned = true;
-                      break;
-                  }
-              }
-              
-              if (!assigned) {
-                  newConns[i] = null;
-              }
-          }
-          return { ...d, psuConnections: newConns };
-      });
+      // 4. Run Auto-Connect Logic
+      const finalDevices = runAutoConnect(positionedDevices, pduState, numPairs, effectiveCap, totalSocketsPerPDU);
 
       setActiveDevices(finalDevices);
       updateDeviceTypes(finalDevices);
     }
-  }, [csvInput, basePduCapacity, baseSocketsPerPDU, secondarySocketsPerPDU, powerFactor, safetyMargin, rackSize]); 
+  }, [csvInput]); 
 
   const updateDeviceTypes = (devices: Device[]) => {
       const types = Array.from(new Set(devices.map(d => d.name)));
@@ -236,77 +493,19 @@ const Dashboard: React.FC = () => {
     // 1. Initialize PDU State
     const pduState: Record<string, { 
           currentLoad: number, 
-          nextSocket: number, 
-          centerY: number,
-          id: string
+          usedSockets: Set<number>, 
+          id: string,
+          index: number
     }> = {};
 
     for(let i=0; i < numPairs; i++) {
-        const cy = getPduCenterY(i, numPairs, totalSocketsPerPDU, rackSize);
-        pduState[`A${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `A${i+1}` };
-        pduState[`B${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `B${i+1}` };
+        pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i };
+        pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i };
     }
 
-    // 2. Sort devices by U Position (Descending) to ensure wires don't cross (Top device -> Top Socket)
-    // Create a copy to sort
-    const devicesProcessList = [...activeDevices].sort((a, b) => {
-        // Unmounted devices go last
-        if (!a.uPosition && !b.uPosition) return 0;
-        if (!a.uPosition) return 1;
-        if (!b.uPosition) return -1;
-        // Higher U position first
-        return b.uPosition - a.uPosition;
-    });
-
-    // 3. Assign Devices (Auto-Patch to Closest)
-    const finalDevices = devicesProcessList.map(d => {
-        const newConns: any = {};
-        
-        if (!d.uPosition) {
-            // Keep it unconnected if not mounted
-            return { ...d, psuConnections: {} }; 
-        }
-
-        const uPos = d.uPosition; 
-        const topPx = RACK_HEADER_HEIGHT + ((rackSize - uPos) * U_HEIGHT_PX);
-        const deviceCenterY = topPx + ((d.uHeight * U_HEIGHT_PX) / 2);
-
-        const loadToAdd = d.powerRatingPerDevice; 
-
-        for(let i=0; i<d.psuCount; i++) {
-            const isEven = i % 2 === 0;
-            const side = isEven ? 'A' : 'B';
-            
-            const candidates = [];
-            for(let k=0; k<numPairs; k++) {
-                candidates.push(pduState[`${side}${k+1}`]);
-            }
-
-            // Sort by distance
-            candidates.sort((a, b) => Math.abs(a.centerY - deviceCenterY) - Math.abs(b.centerY - deviceCenterY));
-            
-            let assigned = false;
-            for (const pdu of candidates) {
-                if (pdu.nextSocket < totalSocketsPerPDU && pdu.currentLoad + loadToAdd <= effectiveCap) {
-                    newConns[i] = {
-                        pduId: pdu.id,
-                        socketIndex: pdu.nextSocket
-                    };
-                    
-                    pdu.nextSocket++;
-                    pdu.currentLoad += loadToAdd;
-                    assigned = true;
-                    break;
-                }
-            }
-            
-            if (!assigned) {
-                newConns[i] = null;
-            }
-        }
-        return { ...d, psuConnections: newConns };
-    });
-
+    // 2. Run Auto-Connect Logic
+    const finalDevices = runAutoConnect(activeDevices, pduState, numPairs, effectiveCap, totalSocketsPerPDU);
+    
     setActiveDevices(finalDevices);
   };
 
@@ -345,8 +544,49 @@ const Dashboard: React.FC = () => {
     if (file) {
       const reader = new FileReader();
       reader.onload = (evt) => {
-        if (evt.target?.result) setCsvInput(evt.target.result as string);
+        if (evt.target?.result) {
+            const content = evt.target.result as string;
+            // Basic detection for JSON vs CSV
+            if (file.name.toLowerCase().endsWith('.json')) {
+                try {
+                    const config = JSON.parse(content);
+                    if (config.rackSize) {
+                        setRackSize(config.rackSize);
+                        setTempRackSize(config.rackSize);
+                    }
+                    if (config.baseSocketsPerPDU) {
+                        setBaseSocketsPerPDU(config.baseSocketsPerPDU);
+                        setTempSockets(config.baseSocketsPerPDU);
+                    }
+                    if (config.secondarySocketsPerPDU !== undefined) {
+                        setSecondarySocketsPerPDU(config.secondarySocketsPerPDU);
+                        setTempSecondarySockets(config.secondarySocketsPerPDU);
+                    }
+                    if (config.pduPhysicalHeight) setPduPhysicalHeight(config.pduPhysicalHeight);
+                    if (config.pduPhysicalWidth) setPduPhysicalWidth(config.pduPhysicalWidth);
+                    if (config.pduCordLength) setPduCordLength(config.pduCordLength);
+                    if (config.basePduCapacity) setBasePduCapacity(config.basePduCapacity);
+                    if (config.safetyMargin) setSafetyMargin(config.safetyMargin);
+                    if (config.powerFactor) setPowerFactor(config.powerFactor);
+                    if (config.socketType) setSocketType(config.socketType);
+                    if (config.secondarySocketType) setSecondarySocketType(config.secondarySocketType);
+                    
+                    if (config.activeDevices) {
+                        setActiveDevices(config.activeDevices);
+                        updateDeviceTypes(config.activeDevices);
+                    }
+                    // We intentionally do not setCsvInput here to avoid triggering the useEffect
+                    // which would re-calculate connections and overwrite the loaded configuration.
+                } catch (err) {
+                    alert('Failed to parse JSON configuration file.');
+                    console.error(err);
+                }
+            } else {
+                setCsvInput(content);
+            }
+        }
         if (fileInputRef.current) fileInputRef.current.value = '';
+        if (configInputRef.current) configInputRef.current.value = '';
       };
       reader.readAsText(file);
     }
@@ -360,6 +600,7 @@ const Dashboard: React.FC = () => {
       setSecondarySocketsPerPDU(4);
       setRackSize(48);
       setTempRackSize(48);
+      setManualPduPairs(null);
   };
   
   const handleDownloadTemplate = () => {
@@ -374,6 +615,32 @@ const Dashboard: React.FC = () => {
   };
 
   const handlePrint = () => window.print();
+
+  const handleExportConfig = () => {
+    const config = {
+        activeDevices,
+        rackSize,
+        baseSocketsPerPDU,
+        secondarySocketsPerPDU,
+        pduPhysicalHeight,
+        pduPhysicalWidth,
+        pduCordLength,
+        basePduCapacity,
+        safetyMargin,
+        powerFactor,
+        socketType,
+        secondarySocketType,
+        csvInput // Saving the source CSV for reference, though activeDevices is the source of truth for layout
+    };
+    const jsonString = JSON.stringify(config, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'rack_config.json';
+    link.click();
+    setShowExportMenu(false);
+  };
 
   // Export Logic (Same as before)
   const captureVisualizer = async () => {
@@ -479,21 +746,61 @@ const Dashboard: React.FC = () => {
   // Move Device Logic
   const handleMoveDevice = (id: string, targetU: number) => {
     setActiveDevices(prev => {
-        const device = prev.find(d => d.id === id);
-        if (!device) return prev;
-        if (targetU > rackSize) return prev;
-        if (targetU - device.uHeight + 1 < 1) return prev;
-        const isCollision = prev.some(d => {
-            if (d.id === id) return false;
-            if (!d.uPosition) return false;
-            const dTop = d.uPosition;
-            const dBottom = d.uPosition - d.uHeight + 1;
-            const targetTop = targetU;
-            const targetBottom = targetU - device.uHeight + 1;
-            return (targetTop >= dBottom && targetBottom <= dTop);
+        const sourceDevice = prev.find(d => d.id === id);
+        if (!sourceDevice) return prev;
+
+        // Find target device occupying the slot (if any)
+        const targetDevice = prev.find(d => 
+            d.id !== id && 
+            d.uPosition !== null && 
+            targetU <= d.uPosition && 
+            targetU >= d.uPosition - d.uHeight + 1
+        );
+
+        let newDevices = [...prev];
+
+        if (targetDevice) {
+            // Swap positions
+            // If source was unmounted, target becomes unmounted (replaces it)
+            const sourcePos = targetDevice.uPosition;
+            const targetPos = sourceDevice.uPosition;
+
+            newDevices = newDevices.map(d => {
+                if (d.id === sourceDevice.id) return { ...d, uPosition: sourcePos };
+                if (d.id === targetDevice.id) return { ...d, uPosition: targetPos };
+                return d;
+            });
+        } else {
+            // Move to empty slot
+            newDevices = newDevices.map(d => {
+                if (d.id === sourceDevice.id) return { ...d, uPosition: targetU };
+                return d;
+            });
+        }
+
+        // Validate Constraints
+        const hasConflict = newDevices.some((d1, i) => {
+            if (d1.uPosition === null) return false;
+            
+            // Rack Boundaries
+            if (d1.uPosition > rackSize) return true;
+            if (d1.uPosition - d1.uHeight + 1 < 1) return true;
+
+            // Overlaps
+            return newDevices.some((d2, j) => {
+                if (i === j) return false;
+                if (d2.uPosition === null) return false;
+
+                const d1Top = d1.uPosition!;
+                const d1Bot = d1.uPosition! - d1.uHeight + 1;
+                const d2Top = d2.uPosition!;
+                const d2Bot = d2.uPosition! - d2.uHeight + 1;
+
+                return Math.max(d1Bot, d2Bot) <= Math.min(d1Top, d2Top);
+            });
         });
-        if (isCollision) return prev;
-        return prev.map(d => d.id === id ? { ...d, uPosition: targetU } : d);
+
+        return hasConflict ? prev : newDevices;
     });
   };
 
@@ -505,26 +812,52 @@ const Dashboard: React.FC = () => {
       socketIndex: number|null
   ) => {
       setActiveDevices(prev => {
-          if (pduId !== null && socketIndex !== null) {
-              const isOccupied = prev.some(d => 
-                  Object.values(d.psuConnections).some((c) => {
-                    const conn = c as PSUConnection | null;
-                    return conn && conn.pduId === pduId && conn.socketIndex === socketIndex;
-                  })
-              );
-              if (isOccupied) return prev;
+          // 1. Find Source Info
+          const sourceDevice = prev.find(d => d.id === deviceId);
+          if (!sourceDevice) return prev;
+          const sourcePrevConn = sourceDevice.psuConnections[psuIndex];
+
+          // 2. Check for Occupant at Target
+          let occupant: { deviceId: string, psuIdx: number } | null = null;
+          
+          if (pduId && socketIndex !== null) {
+              for (const d of prev) {
+                  for(const [idxStr, c] of Object.entries(d.psuConnections)) {
+                      const conn = c as PSUConnection | null;
+                      if (conn && conn.pduId === pduId && conn.socketIndex === socketIndex) {
+                          // If target is effectively the source itself, ignore (no move needed or handled by component)
+                          if (d.id === deviceId && parseInt(idxStr) === psuIndex) return prev;
+                          occupant = { deviceId: d.id, psuIdx: parseInt(idxStr) };
+                          break;
+                      }
+                  }
+                  if (occupant) break;
+              }
           }
+
           return prev.map(d => {
+              const newConns = { ...d.psuConnections };
+              let modified = false;
+
+              // Update Source
               if (d.id === deviceId) {
-                  const newConns = { ...d.psuConnections };
                   if (pduId === null) {
                       newConns[psuIndex] = null;
                   } else {
                       newConns[psuIndex] = { pduId, socketIndex: socketIndex! };
                   }
-                  return { ...d, psuConnections: newConns };
+                  modified = true;
               }
-              return d;
+
+              // Update Occupant (Swap)
+              if (occupant && d.id === occupant.deviceId) {
+                  // Move occupant to source's previous location
+                  // If source was not connected, occupant becomes disconnected (null)
+                  newConns[occupant.psuIdx] = sourcePrevConn || null;
+                  modified = true;
+              }
+
+              return modified ? { ...d, psuConnections: newConns } : d;
           });
       });
   };
@@ -610,9 +943,14 @@ const Dashboard: React.FC = () => {
                  <FileText size={16} /> Template
              </button>
              
-             <label className="px-3 py-2 bg-blue-600 rounded cursor-pointer hover:bg-blue-500 text-white flex items-center gap-2">
-                 <Upload size={16} /> Upload CSV
+             <label className="px-3 py-2 bg-blue-600 rounded cursor-pointer hover:bg-blue-500 text-white flex items-center gap-2" title="Import Rack Data from CSV">
+                 <Upload size={16} /> Import CSV
                  <input ref={fileInputRef} type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+             </label>
+
+             <label className="px-3 py-2 bg-indigo-600 rounded cursor-pointer hover:bg-indigo-500 text-white flex items-center gap-2" title="Load Configuration from JSON">
+                 <FileJson size={16} /> Load Config
+                 <input ref={configInputRef} type="file" accept=".json" onChange={handleFileUpload} className="hidden" />
              </label>
              
              <div className="relative">
@@ -624,6 +962,9 @@ const Dashboard: React.FC = () => {
                  </button>
                  {showExportMenu && (
                      <div className="absolute right-0 mt-2 w-48 bg-white text-slate-900 rounded-lg shadow-xl z-50 overflow-hidden border border-slate-200">
+                         <button onClick={handleExportConfig} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
+                             <FileJson size={16} className="text-orange-500" /> Save Config (JSON)
+                         </button>
                          <button onClick={exportImage} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
                              <FileImage size={16} className="text-emerald-600" /> Save as Image (PNG)
                          </button>
@@ -644,7 +985,8 @@ const Dashboard: React.FC = () => {
              </div>
         </div>
       </header>
-
+      
+      {/* Rest of the component remains unchanged */}
       <main className="max-w-[1920px] mx-auto grid grid-cols-1 xl:grid-cols-5 gap-8">
         
         <aside className="xl:col-span-1 space-y-6 no-print h-fit sticky top-4">
@@ -717,6 +1059,44 @@ const Dashboard: React.FC = () => {
                             {PDU_VARIANTS.map(v => <option key={v.power} value={v.power}>{v.name}</option>)}
                         </select>
                     </div>
+
+                    {/* PDU Count Control */}
+                    <div className="border-b border-slate-700 pb-3">
+                        <label className="text-xs text-slate-400 uppercase font-bold flex justify-between items-center">
+                            <span>PDU Pairs (A+B)</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${manualPduPairs !== null ? 'bg-orange-900/50 text-orange-400 border border-orange-800' : 'bg-slate-800 text-slate-500 border border-slate-700'}`}>
+                                {manualPduPairs !== null ? 'MANUAL' : 'AUTO'}
+                            </span>
+                        </label>
+                        <div className="flex items-center gap-2 mt-2">
+                             <button 
+                                onClick={() => {
+                                    if (activePduPairs > calculatedPduPairs) {
+                                        const newValue = activePduPairs - 1;
+                                        setManualPduPairs(newValue === calculatedPduPairs ? null : newValue);
+                                    }
+                                }}
+                                disabled={activePduPairs <= calculatedPduPairs}
+                                className={`p-2 rounded border flex-1 flex justify-center ${activePduPairs <= calculatedPduPairs ? 'bg-slate-800 text-slate-600 border-slate-700 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-600'}`}
+                             >
+                                <Minus size={16} />
+                             </button>
+                             
+                             <div className="flex-1 text-center font-mono font-bold text-xl bg-slate-800 border border-slate-700 rounded py-1.5">
+                                {activePduPairs}
+                             </div>
+
+                             <button 
+                                onClick={() => setManualPduPairs(activePduPairs + 1)}
+                                className="p-2 rounded border bg-slate-700 hover:bg-slate-600 text-white border-slate-600 flex-1 flex justify-center"
+                             >
+                                <Plus size={16} />
+                             </button>
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-1 text-center">
+                            Min Required: {calculatedPduPairs} pair(s)
+                        </div>
+                    </div>
                     
                     {/* PDU Physical Specs */}
                     <div>
@@ -787,7 +1167,8 @@ const Dashboard: React.FC = () => {
                     <span className="text-md font-mono text-emerald-400">{Math.round(totalLoad)}W</span>
                  </div>
                  <div className="mt-4 pt-4 border-t border-slate-700 text-xs text-slate-500">
-                    Required PDUs: {requiredPduPairs} pair(s) based on capacity & sockets.
+                    Required PDUs: {calculatedPduPairs} pair(s) based on capacity & sockets.
+                    {manualPduPairs !== null && <div className="text-orange-400 mt-1">Overridden to {manualPduPairs} pairs.</div>}
                  </div>
              </div>
         </aside>

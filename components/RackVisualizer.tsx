@@ -39,34 +39,46 @@ const SOCKET_PADDING = 8;
 const THEME = {
   bg: 'bg-white',
   text: 'text-slate-900',
-  textDim: 'text-slate-500',
+  textDim: 'text-slate-600',
   border: 'border-slate-300',
   rackBg: 'bg-slate-800', // Darker rack
   rackBorder: 'border-slate-600', // Darker border
-  deviceBg: 'bg-slate-50', 
-  deviceBorder: 'border-slate-300',
-  deviceHover: 'hover:bg-blue-100',
+  deviceBg: 'bg-slate-300', // Light Grey for devices
+  deviceBorder: 'border-slate-400',
+  deviceHover: 'hover:bg-slate-200',
   rail: 'bg-slate-950' // Dark rails
 };
 
 const SocketIcon = ({ type, used, label, hovered }: { type: SocketType, used: boolean, label: string, hovered: boolean }) => {
-    // Darker socket styling
-    const baseClass = `relative border rounded flex flex-col items-center justify-center shadow-sm transition-colors duration-200 
-      ${used ? 'border-emerald-500 bg-emerald-900/50' : (hovered ? 'border-blue-400 bg-blue-900/30' : 'border-slate-600 bg-slate-800')}
+    let borderColor = 'border-slate-600';
+    let bgColor = 'bg-slate-800';
+    let ring = '';
+    const pinColorClass = (isUsed: boolean) => isUsed ? 'bg-emerald-400' : 'bg-slate-600';
+
+    if (used) {
+        borderColor = 'border-emerald-500';
+        bgColor = 'bg-emerald-900/50';
+    }
+    
+    if (hovered) {
+         borderColor = 'border-blue-400';
+         bgColor = used ? 'bg-blue-900/40' : 'bg-blue-900/30';
+         ring = 'ring-2 ring-blue-500 z-50'; 
+    }
+
+    const baseClass = `relative border rounded flex flex-col items-center justify-center shadow-sm transition-all duration-200 
+      ${borderColor} ${bgColor} ${ring}
     `;
 
     const style = { height: `${SOCKET_H}px`, width: '28px' };
-
-    // Common styling for pins - lighter on dark bg
-    const pinClass = (isUsed: boolean) => isUsed ? 'bg-emerald-400' : 'bg-slate-600';
 
     if (type === 'UK') {
         return (
             <div className={baseClass} style={style}>
                 <div className="flex gap-[2px] items-center">
-                    <div className={`w-[2px] h-[3px] ${pinClass(used)} rounded-sm`}></div>
-                    <div className={`w-[2px] h-[3px] ${pinClass(used)} rounded-sm`}></div>
-                    <div className={`w-[2px] h-[3px] ${pinClass(used)} rounded-sm`}></div>
+                    <div className={`w-[2px] h-[3px] ${pinColorClass(used)} rounded-sm`}></div>
+                    <div className={`w-[2px] h-[3px] ${pinColorClass(used)} rounded-sm`}></div>
+                    <div className={`w-[2px] h-[3px] ${pinColorClass(used)} rounded-sm`}></div>
                 </div>
                 <span className="absolute -left-8 text-[8px] text-slate-400 w-6 text-right font-mono">{label}</span>
             </div>
@@ -76,9 +88,9 @@ const SocketIcon = ({ type, used, label, hovered }: { type: SocketType, used: bo
          return (
             <div className={baseClass} style={style}>
                  <div className="flex gap-[2px]">
-                    <div className={`w-[2px] h-[2px] ${pinClass(used)} rounded-full`}></div>
-                    <div className={`w-[2px] h-[2px] ${pinClass(used)} rounded-full`}></div>
-                    <div className={`w-[2px] h-[2px] ${pinClass(used)} rounded-full`}></div>
+                    <div className={`w-[2px] h-[2px] ${pinColorClass(used)} rounded-full`}></div>
+                    <div className={`w-[2px] h-[2px] ${pinColorClass(used)} rounded-full`}></div>
+                    <div className={`w-[2px] h-[2px] ${pinColorClass(used)} rounded-full`}></div>
                 </div>
                 <span className="absolute -left-8 text-[8px] text-slate-400 w-6 text-right font-mono">{label}</span>
             </div>
@@ -88,8 +100,8 @@ const SocketIcon = ({ type, used, label, hovered }: { type: SocketType, used: bo
     return (
         <div className={baseClass} style={style}>
              <div className="flex gap-[2px]">
-                <div className={`w-[2px] h-[3px] ${pinClass(used)}`}></div>
-                <div className={`w-[2px] h-[3px] ${pinClass(used)}`}></div>
+                <div className={`w-[2px] h-[3px] ${pinColorClass(used)}`}></div>
+                <div className={`w-[2px] h-[3px] ${pinColorClass(used)}`}></div>
              </div>
              <span className="absolute -left-8 text-[8px] text-slate-400 w-6 text-right font-mono">{label}</span>
         </div>
@@ -199,7 +211,7 @@ const RackVisualizer: React.FC<Props> = ({
     e.preventDefault();
     e.stopPropagation();
     setHoveredSocket(null);
-    if (isOccupied) return;
+    // Allow dropping on occupied sockets to trigger swap/replace logic in parent
 
     const type = e.dataTransfer.getData('type');
     if (type === 'cable') {
@@ -212,12 +224,9 @@ const RackVisualizer: React.FC<Props> = ({
 
   const handleSocketDragOver = (e: React.DragEvent, pduId: string, index: number, isOccupied: boolean) => {
     e.preventDefault();
-    if (isOccupied) {
-        e.dataTransfer.dropEffect = 'none';
-    } else {
-        e.dataTransfer.dropEffect = 'link';
-        setHoveredSocket({ pduId, index });
-    }
+    // Allow hover even if occupied
+    e.dataTransfer.dropEffect = 'link';
+    setHoveredSocket({ pduId, index });
   };
 
   // --- Rendering ---
@@ -398,13 +407,11 @@ const RackVisualizer: React.FC<Props> = ({
             key={`u-${u}`} 
             draggable
             onDragStart={(e) => handleDeviceDragStart(e, device)}
-            className={`w-full relative border-b ${THEME.deviceBorder} ${THEME.deviceBg} ${THEME.deviceHover} transition-colors group flex items-center px-2 box-border cursor-grab active:cursor-grabbing ${isDragging ? 'opacity-50 dashed border-2 border-blue-500' : ''}`}
-            style={{ height: `${heightPx}px` }}
+            onDragOver={handleRackDragOver}
+            onDrop={(e) => handleRackDrop(e, u)}
+            className={`w-[calc(100%-12px)] mx-auto relative border ${THEME.deviceBorder} ${THEME.deviceBg} ${THEME.deviceHover} rounded-md transition-colors group flex items-center px-2 box-border cursor-grab active:cursor-grabbing shadow-sm ${isDragging ? 'opacity-50 dashed border-2 border-blue-500' : ''}`}
+            style={{ height: `${heightPx - 2}px`, marginTop: '1px', marginBottom: '1px' }}
           >
-            {/* Rails */}
-            <div className={`absolute left-0 top-0 bottom-0 w-1 ${THEME.rail}`}></div>
-            <div className={`absolute right-0 top-0 bottom-0 w-1 ${THEME.rail}`}></div>
-            
             {/* Device Info */}
             <div className="flex-1 flex items-center gap-2 overflow-hidden pointer-events-none z-10 mr-2 min-w-0 h-full">
                 <span className={`${THEME.textDim} font-mono text-[10px] w-5 shrink-0 text-right`}>{u}</span>
@@ -657,7 +664,12 @@ const RackVisualizer: React.FC<Props> = ({
         style={{ left: rackLeftX, height: rackHeightPx, top: TOP_OFFSET }}
       >
          <div className="h-4 shrink-0 bg-slate-900 w-full border-b border-slate-700"></div>
-         <div className="flex-1 flex flex-col w-full relative">
+         
+         {/* Rack Rails - Moved Here */}
+         <div className="absolute left-1 top-0 bottom-0 w-1 bg-black/50 z-10 pointer-events-none"></div>
+         <div className="absolute right-1 top-0 bottom-0 w-1 bg-black/50 z-10 pointer-events-none"></div>
+
+         <div className="flex-1 flex flex-col w-full relative z-20">
              {renderRack()}
          </div>
          <div className="h-4 shrink-0 bg-slate-900 w-full border-t border-slate-700"></div>
