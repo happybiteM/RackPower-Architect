@@ -1,18 +1,15 @@
-
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { parseCSV } from '../utils/csvParser';
 import { DEFAULT_CSV, PDU_VARIANTS } from '../constants';
 import RackVisualizer from './RackVisualizer';
 import { Device, PSUConnection, SocketType, PDUConfig } from '../types';
-import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode } from 'lucide-react';
+import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 
 // --- Geometry Constants (Must match RackVisualizer) ---
-const U_HEIGHT_PX = 30; // Reduced from 45
+const U_HEIGHT_PX = 30; 
 const RACK_HEADER_HEIGHT = 16;
-const RACK_U_COUNT = 48;
-const RACK_HEIGHT_PX = (RACK_U_COUNT * U_HEIGHT_PX) + (RACK_HEADER_HEIGHT * 2);
 
 const PDU_HEADER_H = 40;
 const PDU_FOOTER_H = 40;
@@ -28,6 +25,9 @@ const Dashboard: React.FC = () => {
   const [activeDevices, setActiveDevices] = useState<Device[]>([]);
 
   // Configuration
+  const [rackSize, setRackSize] = useState(48);
+  const [tempRackSize, setTempRackSize] = useState<number | string>(48);
+
   const [baseSocketsPerPDU, setBaseSocketsPerPDU] = useState(20);
   const [tempSockets, setTempSockets] = useState<number | string>(20); 
 
@@ -66,8 +66,8 @@ const Dashboard: React.FC = () => {
     // Effective capacity per side (A or B) taking redundancy into account.
     const effectiveCapacity = basePduCapacity * powerFactor * (safetyMargin / 100);
     
-    // Power Requirement (Ceil)
-    const pairsByPower = Math.ceil(totalMaxPower / effectiveCapacity);
+    // Power Requirement (Ceil) -> Added 15% buffer for bin-packing inefficiencies
+    const pairsByPower = Math.ceil((totalMaxPower * 1.15) / effectiveCapacity);
     
     // Socket Requirement (Total sockets = base + secondary)
     const totalSocketsPerPDU = baseSocketsPerPDU + secondarySocketsPerPDU;
@@ -107,11 +107,27 @@ const Dashboard: React.FC = () => {
   }, [requiredPduPairs, baseSocketsPerPDU, secondarySocketsPerPDU, basePduCapacity, socketType, secondarySocketType]);
 
 
-  // Initial Load & Auto-Patching
+  // Helper: Get geometric center Y of a PDU pair
+  const getPduCenterY = (index: number, numPairs: number, totalSocketsPerPDU: number, rackSizeU: number) => {
+      const getPDUHeight = (socketCount: number) => {
+          const contentH = (socketCount * SOCKET_H) + ((socketCount - 1) * SOCKET_GAP);
+          return PDU_HEADER_H + SOCKET_PADDING + contentH + SOCKET_PADDING + PDU_FOOTER_H;
+      };
+      const singlePduHeight = getPDUHeight(totalSocketsPerPDU);
+      const totalGroupHeight = (numPairs * singlePduHeight) + ((numPairs - 1) * PDU_VERTICAL_GAP);
+      
+      const rackHeightPx = (rackSizeU * U_HEIGHT_PX) + (RACK_HEADER_HEIGHT * 2);
+      const startY = Math.max(0, (rackHeightPx - totalGroupHeight) / 2);
+
+      const y = startY + index * (singlePduHeight + PDU_VERTICAL_GAP);
+      return y + (singlePduHeight / 2);
+  };
+
+  // Initial Load & Auto-Patching when CSV changes
   useEffect(() => {
     const groups = parseCSV(csvInput);
     if (groups.length > 0) {
-      const devices = groups[0].devices;
+      let devices = groups[0].devices;
       
       const effectiveCap = basePduCapacity * powerFactor * (safetyMargin / 100);
       const totalSocketsPerPDU = baseSocketsPerPDU + secondarySocketsPerPDU;
@@ -119,25 +135,12 @@ const Dashboard: React.FC = () => {
       // 1. Determine how many PDUs we will likely have (Estimation)
       const totalMaxPower = devices.reduce((sum, d) => sum + d.powerRatingPerDevice, 0);
       const totalPSUs = devices.reduce((sum, d) => sum + d.psuCount, 0);
-      const pairsByPower = Math.ceil(totalMaxPower / effectiveCap);
+      
+      const pairsByPower = Math.ceil((totalMaxPower * 1.15) / effectiveCap);
       const pairsBySockets = Math.ceil((totalPSUs / 2) / totalSocketsPerPDU);
       const numPairs = Math.max(1, pairsByPower, pairsBySockets);
 
-      // 2. Calculate PDU Geometry & Positions
-      const getPDUHeight = (socketCount: number) => {
-          const contentH = (socketCount * SOCKET_H) + ((socketCount - 1) * SOCKET_GAP);
-          return PDU_HEADER_H + SOCKET_PADDING + contentH + SOCKET_PADDING + PDU_FOOTER_H;
-      };
-      const singlePduHeight = getPDUHeight(totalSocketsPerPDU);
-      const totalGroupHeight = (numPairs * singlePduHeight) + ((numPairs - 1) * PDU_VERTICAL_GAP);
-      const startY = Math.max(0, (RACK_HEIGHT_PX - totalGroupHeight) / 2);
-
-      const getPduCenterY = (index: number) => {
-          const y = startY + index * (singlePduHeight + PDU_VERTICAL_GAP);
-          return y + (singlePduHeight / 2);
-      };
-
-      // 3. Initialize PDU State with geometric info
+      // 2. Initialize PDU State with geometric info
       const pduState: Record<string, { 
           currentLoad: number, 
           nextSocket: number, 
@@ -146,17 +149,31 @@ const Dashboard: React.FC = () => {
       }> = {};
       
       for(let i=0; i < numPairs; i++) {
-          const cy = getPduCenterY(i);
+          const cy = getPduCenterY(i, numPairs, totalSocketsPerPDU, rackSize);
           pduState[`A${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `A${i+1}` };
           pduState[`B${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `B${i+1}` };
       }
 
-      // 4. Assign Devices (Auto-Patch to Closest)
-      const finalDevices = devices.map(d => {
+      // 3. Assign Devices (Auto-Patch to Closest)
+      // Adjust positions for CSV import based on rack size (simple stack down from top)
+      let currentU = rackSize;
+      const positionedDevices = devices.map(d => {
+           // We are re-stacking here to ensure it fits the new rack size
+           if (currentU - d.uHeight + 1 >= 1) {
+                const pos = currentU;
+                currentU -= d.uHeight;
+                return { ...d, uPosition: pos };
+           }
+           return { ...d, uPosition: null };
+      });
+
+      const finalDevices = positionedDevices.map(d => {
           const newConns: any = {};
           
-          const uPos = d.uPosition || 48; 
-          const topPx = RACK_HEADER_HEIGHT + ((48 - uPos) * U_HEIGHT_PX);
+          if (!d.uPosition) return { ...d, psuConnections: {} };
+
+          const uPos = d.uPosition; 
+          const topPx = RACK_HEADER_HEIGHT + ((rackSize - uPos) * U_HEIGHT_PX);
           const deviceCenterY = topPx + ((d.uHeight * U_HEIGHT_PX) / 2);
 
           const loadToAdd = d.powerRatingPerDevice; 
@@ -199,7 +216,7 @@ const Dashboard: React.FC = () => {
       setActiveDevices(finalDevices);
       updateDeviceTypes(finalDevices);
     }
-  }, [csvInput, basePduCapacity, baseSocketsPerPDU, secondarySocketsPerPDU, powerFactor, safetyMargin]); 
+  }, [csvInput, basePduCapacity, baseSocketsPerPDU, secondarySocketsPerPDU, powerFactor, safetyMargin, rackSize]); 
 
   const updateDeviceTypes = (devices: Device[]) => {
       const types = Array.from(new Set(devices.map(d => d.name)));
@@ -207,6 +224,101 @@ const Dashboard: React.FC = () => {
   };
 
   // --- Handlers ---
+
+  const handleAutoConnect = () => {
+    // Uses current activeDevices and current configuration to re-run connection logic
+    const effectiveCap = basePduCapacity * powerFactor * (safetyMargin / 100);
+    const totalSocketsPerPDU = baseSocketsPerPDU + secondarySocketsPerPDU;
+    
+    // We reuse the calculated 'pdus' array to know how many pairs we have currently
+    const numPairs = pdus.length / 2;
+
+    // 1. Initialize PDU State
+    const pduState: Record<string, { 
+          currentLoad: number, 
+          nextSocket: number, 
+          centerY: number,
+          id: string
+    }> = {};
+
+    for(let i=0; i < numPairs; i++) {
+        const cy = getPduCenterY(i, numPairs, totalSocketsPerPDU, rackSize);
+        pduState[`A${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `A${i+1}` };
+        pduState[`B${i+1}`] = { currentLoad: 0, nextSocket: 0, centerY: cy, id: `B${i+1}` };
+    }
+
+    // 2. Sort devices by U Position (Descending) to ensure wires don't cross (Top device -> Top Socket)
+    // Create a copy to sort
+    const devicesProcessList = [...activeDevices].sort((a, b) => {
+        // Unmounted devices go last
+        if (!a.uPosition && !b.uPosition) return 0;
+        if (!a.uPosition) return 1;
+        if (!b.uPosition) return -1;
+        // Higher U position first
+        return b.uPosition - a.uPosition;
+    });
+
+    // 3. Assign Devices (Auto-Patch to Closest)
+    const finalDevices = devicesProcessList.map(d => {
+        const newConns: any = {};
+        
+        if (!d.uPosition) {
+            // Keep it unconnected if not mounted
+            return { ...d, psuConnections: {} }; 
+        }
+
+        const uPos = d.uPosition; 
+        const topPx = RACK_HEADER_HEIGHT + ((rackSize - uPos) * U_HEIGHT_PX);
+        const deviceCenterY = topPx + ((d.uHeight * U_HEIGHT_PX) / 2);
+
+        const loadToAdd = d.powerRatingPerDevice; 
+
+        for(let i=0; i<d.psuCount; i++) {
+            const isEven = i % 2 === 0;
+            const side = isEven ? 'A' : 'B';
+            
+            const candidates = [];
+            for(let k=0; k<numPairs; k++) {
+                candidates.push(pduState[`${side}${k+1}`]);
+            }
+
+            // Sort by distance
+            candidates.sort((a, b) => Math.abs(a.centerY - deviceCenterY) - Math.abs(b.centerY - deviceCenterY));
+            
+            let assigned = false;
+            for (const pdu of candidates) {
+                if (pdu.nextSocket < totalSocketsPerPDU && pdu.currentLoad + loadToAdd <= effectiveCap) {
+                    newConns[i] = {
+                        pduId: pdu.id,
+                        socketIndex: pdu.nextSocket
+                    };
+                    
+                    pdu.nextSocket++;
+                    pdu.currentLoad += loadToAdd;
+                    assigned = true;
+                    break;
+                }
+            }
+            
+            if (!assigned) {
+                newConns[i] = null;
+            }
+        }
+        return { ...d, psuConnections: newConns };
+    });
+
+    setActiveDevices(finalDevices);
+  };
+
+  const handleApplyRackSize = () => {
+    const val = Number(tempRackSize);
+    if (!isNaN(val) && val >= 4 && val <= 52) {
+        setRackSize(Math.floor(val));
+    } else {
+        alert("Please enter a valid integer between 4 and 52.");
+        setTempRackSize(rackSize);
+    }
+  };
 
   const handleApplySockets = () => {
     const val = Number(tempSockets);
@@ -246,8 +358,21 @@ const Dashboard: React.FC = () => {
       setBaseSocketsPerPDU(20);
       setTempSecondarySockets(4);
       setSecondarySocketsPerPDU(4);
+      setRackSize(48);
+      setTempRackSize(48);
   };
   
+  const handleDownloadTemplate = () => {
+    const blob = new Blob([DEFAULT_CSV], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'rack_import_template.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handlePrint = () => window.print();
 
   // Export Logic (Same as before)
@@ -356,7 +481,7 @@ const Dashboard: React.FC = () => {
     setActiveDevices(prev => {
         const device = prev.find(d => d.id === id);
         if (!device) return prev;
-        if (targetU > 48) return prev;
+        if (targetU > rackSize) return prev;
         if (targetU - device.uHeight + 1 < 1) return prev;
         const isCollision = prev.some(d => {
             if (d.id === id) return false;
@@ -470,12 +595,21 @@ const Dashboard: React.FC = () => {
       <header className="max-w-[1920px] mx-auto mb-6 flex flex-col md:flex-row justify-between items-center gap-4 no-print">
         <div>
            <h1 className="text-3xl font-bold text-white tracking-tight">Rack Power Architect</h1>
-           <p className="text-slate-400 mt-1">Interactive 48U Layout & Power Planning</p>
+           <p className="text-slate-400 mt-1">Interactive Layout & Power Planning</p>
         </div>
         <div className="flex gap-2 relative">
+             <button onClick={handleAutoConnect} className="px-3 py-2 bg-orange-700 rounded border border-orange-600 hover:bg-orange-600 text-white flex items-center gap-2" title="Recalculate wiring based on current positions">
+                 <RefreshCw size={16} /> Recalculate Wiring
+             </button>
+
              <button onClick={handleReset} className="px-3 py-2 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700 flex items-center gap-2">
                  <RotateCcw size={16} /> Reset
              </button>
+
+             <button onClick={handleDownloadTemplate} className="px-3 py-2 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700 flex items-center gap-2 text-slate-300" title="Download CSV Template">
+                 <FileText size={16} /> Template
+             </button>
+             
              <label className="px-3 py-2 bg-blue-600 rounded cursor-pointer hover:bg-blue-500 text-white flex items-center gap-2">
                  <Upload size={16} /> Upload CSV
                  <input ref={fileInputRef} type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
@@ -519,6 +653,19 @@ const Dashboard: React.FC = () => {
                 <h3 className="font-bold text-white mb-4 flex items-center gap-2"><Settings size={18} /> Global Config</h3>
                 <div className="space-y-4">
                     
+                    {/* Rack Size */}
+                    <div className="border-b border-slate-700 pb-3">
+                        <label className="text-xs text-slate-400 uppercase font-bold">Rack Size (U)</label>
+                        <div className="flex gap-2 mt-1 mb-2">
+                            <input 
+                                type="number" min="4" max="52" 
+                                value={tempRackSize} onChange={e => setTempRackSize(e.target.value)}
+                                className="w-full bg-slate-800 border border-slate-700 rounded p-2"
+                            />
+                            <button onClick={handleApplyRackSize} className="bg-blue-600 hover:bg-blue-500 text-white px-2 rounded text-xs font-bold">SET</button>
+                        </div>
+                    </div>
+
                     {/* Primary Sockets */}
                     <div className="border-b border-slate-700 pb-3">
                         <label className="text-xs text-slate-400 uppercase font-bold">Group 1: Sockets</label>
@@ -660,6 +807,7 @@ const Dashboard: React.FC = () => {
                         pduPhysicalHeight={pduPhysicalHeight}
                         pduPhysicalWidth={pduPhysicalWidth}
                         pduCordLength={pduCordLength}
+                        rackSize={rackSize}
                      />
                  ) : (
                      <div className="text-slate-500 mt-20 text-center w-[600px]">No devices loaded. Upload a CSV to begin.</div>

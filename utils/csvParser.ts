@@ -5,7 +5,7 @@ export const parseCSV = (csvText: string): RackGroup[] => {
   const lines = csvText.trim().split('\n');
   if (lines.length < 2) return [];
 
-  // Simple CSV parser that handles quoted strings
+  // Robust CSV Line Parser
   const parseLine = (text: string) => {
     const result: string[] = [];
     let cell = '';
@@ -23,53 +23,83 @@ export const parseCSV = (csvText: string): RackGroup[] => {
   };
 
   const headers = parseLine(lines[0]).map(h => h.replace(/^"|"$/g, '').trim());
+  
+  // Helper to find column index with multiple keywords
   const getColIndex = (keywords: string[]) => 
     headers.findIndex(h => keywords.some(k => h.toLowerCase().includes(k.toLowerCase())));
 
-  const idxRoom = getColIndex(['Room']);
-  const idxDevice = getColIndex(['Device']);
-  const idxRackU = getColIndex(['Rack Size', 'Size (U)']);
-  const idxQty = getColIndex(['Total No. of Device']);
-  const idxPSCount = getColIndex(['Total No. of PS']);
-  const idxMaxPowerPerDevice = getColIndex(['Max Power (Watt)']);
-  const idxTypicalPower = getColIndex(['Typical Power']);
-  const idxTotalMaxPower = getColIndex(['Total Max Power Consumption']);
-  const idxConnType = getColIndex(['Connection Type']);
-  const idxPSURating = getColIndex(['PSU Rating']);
+  const idxRoom = getColIndex(['Room', 'Location', 'Rack Name']);
+  const idxDevice = getColIndex(['Device', 'Model', 'Equipment']);
+  const idxRackU = getColIndex(['Rack Size', 'Size (U)', 'U Height', 'Height']);
+  const idxQty = getColIndex(['Total No. of Device', 'Quantity', 'Qty', 'Count', 'No. of Devices']);
+  const idxPSCount = getColIndex(['Total No. of PS', 'PSU Count', 'Power Supplies']);
+  const idxMaxPowerPerDevice = getColIndex(['Max Power (Watt)', 'Max Power', 'Power (W)']);
+  const idxTypicalPower = getColIndex(['Typical Power', 'Typical Load']);
+  const idxTotalMaxPower = getColIndex(['Total Max Power Consumption', 'Total Power']);
+  const idxConnType = getColIndex(['Connection Type', 'Plug Type', 'Socket']);
+  const idxPSURating = getColIndex(['PSU Rating', 'PSU W', 'Power Supply Rating']);
 
   const racksMap = new Map<string, Device[]>();
+  let lastRoom = 'Default Room';
 
   for (let i = 1; i < lines.length; i++) {
     const row = parseLine(lines[i]);
-    if (row.length < headers.length * 0.5) continue;
+    if (row.length < headers.length * 0.5 && row.length < 2) continue; // Skip empty lines
 
-    const room = row[idxRoom] || 'Unknown Room';
-    const deviceName = row[idxDevice] || 'Unknown Device';
-    const qty = parseInt(row[idxQty]) || 1;
-    const psCountTotal = parseInt(row[idxPSCount]) || 1;
+    // Room Logic: Implement "Fill Down" behavior for empty cells
+    let room = lastRoom;
+    if (idxRoom !== -1) {
+        const val = row[idxRoom];
+        if (val && val.replace(/^"|"$/g, '').trim().length > 0) {
+            room = val.replace(/^"|"$/g, '').trim();
+            lastRoom = room;
+        } 
+        // If empty, it stays as lastRoom (Fill Down)
+    } else {
+        // If no Room column exists, use Default Room for all
+        room = 'Default Room';
+    }
+
+    const deviceName = idxDevice !== -1 ? (row[idxDevice]?.replace(/^"|"$/g, '') || 'Unknown Device') : 'Unknown Device';
+    
+    // Quantity Parsing
+    let qty = 1;
+    if (idxQty !== -1) {
+        const parsed = parseInt(row[idxQty]);
+        if (!isNaN(parsed) && parsed > 0) qty = parsed;
+    }
+
+    // PSU Count Parsing
+    let psCountTotal = qty; // Default 1 per device
+    if (idxPSCount !== -1) {
+        const parsed = parseInt(row[idxPSCount]);
+        if (!isNaN(parsed) && parsed > 0) psCountTotal = parsed;
+    }
     const psPerDevice = Math.max(1, Math.floor(psCountTotal / qty));
     
     // U Height parsing
     let uHeight = 1;
-    const rawU = parseInt(row[idxRackU]);
-    if (!isNaN(rawU) && rawU > 0) {
-      uHeight = rawU;
+    if (idxRackU !== -1) {
+      const rawU = parseInt(row[idxRackU]);
+      if (!isNaN(rawU) && rawU > 0) {
+        uHeight = rawU;
+      }
     }
 
     // Power Calc
     let maxPower = 0;
-    const rawMax = parseFloat(row[idxMaxPowerPerDevice]);
-    const rawTotal = parseFloat(row[idxTotalMaxPower]);
-    const rawRating = parseFloat(row[idxPSURating]);
+    const rawMax = idxMaxPowerPerDevice !== -1 ? parseFloat(row[idxMaxPowerPerDevice]) : NaN;
+    const rawTotal = idxTotalMaxPower !== -1 ? parseFloat(row[idxTotalMaxPower]) : NaN;
+    const rawRating = idxPSURating !== -1 ? parseFloat(row[idxPSURating]) : NaN;
 
     if (!isNaN(rawMax) && rawMax > 0) maxPower = rawMax;
     else if (!isNaN(rawTotal) && rawTotal > 0) maxPower = rawTotal / qty;
     else if (!isNaN(rawRating)) maxPower = rawRating * psPerDevice;
 
-    let typicalPower = parseFloat(row[idxTypicalPower]);
+    let typicalPower = idxTypicalPower !== -1 ? parseFloat(row[idxTypicalPower]) : NaN;
     if (isNaN(typicalPower)) typicalPower = maxPower * 0.6; // Default to 60% if missing
 
-    const connectionType = row[idxConnType] || 'C13';
+    const connectionType = idxConnType !== -1 ? (row[idxConnType]?.replace(/^"|"$/g, '') || 'C13') : 'C13';
 
     for (let k = 0; k < qty; k++) {
       const device: Device = {
@@ -79,7 +109,7 @@ export const parseCSV = (csvText: string): RackGroup[] => {
         psuCount: psPerDevice,
         typicalPower: typicalPower,
         powerRatingPerDevice: maxPower,
-        connectionType: connectionType.replace(/^"|"$/g, ''),
+        connectionType: connectionType,
         uHeight: uHeight,
         uPosition: null, // Assigned later
         psuConnections: {}
@@ -92,33 +122,29 @@ export const parseCSV = (csvText: string): RackGroup[] => {
 
   const result: RackGroup[] = [];
   racksMap.forEach((devices, roomId) => {
-    // Auto-stack logic: Start from U42 going down (leaving some top space)
-    let currentU = 42;
+    // Auto-stack logic: Start from U42 going down
+    // We use U45 as top to leave space for patch panels/PDUs if needed, or just U48 max.
+    // Let's use U48 down to 1.
+    let currentU = 48;
     
     // Assign positions
     const positionedDevices = devices.map(d => {
+      // Check if it fits
       if (currentU - d.uHeight + 1 >= 1) {
         const pos = currentU;
         currentU -= d.uHeight;
         
-        // Auto-patching logic
-        // Try to distribute PSUs evenly
-        // PSU 0 -> PDU A, Socket X
-        // PSU 1 -> PDU B, Socket X
-        // Simple sequential socket assignment for now
-        // This is a rough heuristic, the visualizer handles the real indices
+        // Initialize empty connections
         const conns: any = {};
         for(let p=0; p<d.psuCount; p++) {
-             // We can't really know the socket index globally here without tracking PDU state
-             // So we leave it empty and let the Dashboard component handle initial auto-patching 
-             // or just leave unconnected. 
-             // Let's leave empty to allow user to drag, or simple default in dashboard.
              conns[p] = null;
         }
 
         return { ...d, uPosition: pos, psuConnections: conns };
       }
-      return { ...d, uPosition: null, psuConnections: {} }; // No space left
+      
+      // Device doesn't fit in rack
+      return { ...d, uPosition: null, psuConnections: {} }; 
     });
 
     const totalPower = positionedDevices.reduce((sum, d) => sum + d.powerRatingPerDevice, 0);

@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { Device, PSUConnection, PDUConfig, SocketType } from '../types';
-import { Plug, Zap } from 'lucide-react';
+import { Plug, Zap, AlertTriangle } from 'lucide-react';
 
 interface Props {
   devices: Device[];
@@ -14,12 +14,11 @@ interface Props {
   pduPhysicalHeight: number; // in cm
   pduPhysicalWidth: number; // in cm
   pduCordLength: number; // in m
+  rackSize: number;
 }
 
 const U_HEIGHT_PX = 30; // Reduced from 45
-const RACK_U_COUNT = 48;
 const RACK_HEADER_HEIGHT = 16;
-const RACK_HEIGHT_PX = (RACK_U_COUNT * U_HEIGHT_PX) + (RACK_HEADER_HEIGHT * 2);
 
 // Layout Constants (Pixels)
 const TABLE_WIDTH = 300; // New summary table on the left
@@ -28,6 +27,7 @@ const PDU_WIDTH = 60;
 const RACK_WIDTH = 420;
 const WIRE_GAP = 120;
 const PDU_VERTICAL_GAP = 20;
+const TOP_OFFSET = 60; // Space for Rack Name Header
 
 const PDU_HEADER_H = 40;
 const PDU_FOOTER_H = 40;
@@ -41,23 +41,24 @@ const THEME = {
   text: 'text-slate-900',
   textDim: 'text-slate-500',
   border: 'border-slate-300',
-  rackBg: 'bg-slate-100',
-  rackBorder: 'border-slate-400',
-  deviceBg: 'bg-white',
+  rackBg: 'bg-slate-800', // Darker rack
+  rackBorder: 'border-slate-600', // Darker border
+  deviceBg: 'bg-slate-50', 
   deviceBorder: 'border-slate-300',
-  deviceHover: 'hover:bg-blue-50',
-  rail: 'bg-slate-300'
+  deviceHover: 'hover:bg-blue-100',
+  rail: 'bg-slate-950' // Dark rails
 };
 
 const SocketIcon = ({ type, used, label, hovered }: { type: SocketType, used: boolean, label: string, hovered: boolean }) => {
+    // Darker socket styling
     const baseClass = `relative border rounded flex flex-col items-center justify-center shadow-sm transition-colors duration-200 
-      ${used ? 'border-emerald-500 bg-emerald-100' : (hovered ? 'border-blue-400 bg-blue-50' : 'border-slate-400 bg-slate-50')}
+      ${used ? 'border-emerald-500 bg-emerald-900/50' : (hovered ? 'border-blue-400 bg-blue-900/30' : 'border-slate-600 bg-slate-800')}
     `;
 
     const style = { height: `${SOCKET_H}px`, width: '28px' };
 
-    // Common styling for pins
-    const pinClass = (isUsed: boolean) => isUsed ? 'bg-emerald-500' : 'bg-slate-400';
+    // Common styling for pins - lighter on dark bg
+    const pinClass = (isUsed: boolean) => isUsed ? 'bg-emerald-400' : 'bg-slate-600';
 
     if (type === 'UK') {
         return (
@@ -67,7 +68,7 @@ const SocketIcon = ({ type, used, label, hovered }: { type: SocketType, used: bo
                     <div className={`w-[2px] h-[3px] ${pinClass(used)} rounded-sm`}></div>
                     <div className={`w-[2px] h-[3px] ${pinClass(used)} rounded-sm`}></div>
                 </div>
-                <span className="absolute -left-8 text-[8px] text-slate-500 w-6 text-right font-mono">{label}</span>
+                <span className="absolute -left-8 text-[8px] text-slate-400 w-6 text-right font-mono">{label}</span>
             </div>
         );
     }
@@ -79,7 +80,7 @@ const SocketIcon = ({ type, used, label, hovered }: { type: SocketType, used: bo
                     <div className={`w-[2px] h-[2px] ${pinClass(used)} rounded-full`}></div>
                     <div className={`w-[2px] h-[2px] ${pinClass(used)} rounded-full`}></div>
                 </div>
-                <span className="absolute -left-8 text-[8px] text-slate-500 w-6 text-right font-mono">{label}</span>
+                <span className="absolute -left-8 text-[8px] text-slate-400 w-6 text-right font-mono">{label}</span>
             </div>
          );
     }
@@ -90,7 +91,7 @@ const SocketIcon = ({ type, used, label, hovered }: { type: SocketType, used: bo
                 <div className={`w-[2px] h-[3px] ${pinClass(used)}`}></div>
                 <div className={`w-[2px] h-[3px] ${pinClass(used)}`}></div>
              </div>
-             <span className="absolute -left-8 text-[8px] text-slate-500 w-6 text-right font-mono">{label}</span>
+             <span className="absolute -left-8 text-[8px] text-slate-400 w-6 text-right font-mono">{label}</span>
         </div>
     );
 };
@@ -105,14 +106,20 @@ const RackVisualizer: React.FC<Props> = ({
   safetyMargin,
   pduPhysicalHeight,
   pduPhysicalWidth,
-  pduCordLength
+  pduCordLength,
+  rackSize
 }) => {
   const [draggedDevice, setDraggedDevice] = useState<string | null>(null);
   const [draggedCable, setDraggedCable] = useState<{deviceId: string, psuIndex: number} | null>(null);
   const [hoveredSocket, setHoveredSocket] = useState<{pduId: string, index: number} | null>(null);
 
+  // Derive RACK HEIGHT based on prop
+  const rackHeightPx = (rackSize * U_HEIGHT_PX) + (RACK_HEADER_HEIGHT * 2);
+
   const pdusA = pdus.filter(p => p.side === 'A');
   const pdusB = pdus.filter(p => p.side === 'B');
+
+  const unmountedDevices = devices.filter(d => d.uPosition === null);
 
   // --- Layout Calculations ---
   
@@ -129,7 +136,7 @@ const RackVisualizer: React.FC<Props> = ({
   const getGroupStartY = (groupPdus: PDUConfig[]) => {
       if (groupPdus.length === 0) return 0;
       const totalH = groupPdus.reduce((sum, p) => sum + getPDUHeight(p.socketCount + (p.secondarySocketCount || 0)), 0) + ((groupPdus.length - 1) * PDU_VERTICAL_GAP);
-      return Math.max(0, (RACK_HEIGHT_PX - totalH) / 2);
+      return Math.max(0, (rackHeightPx - totalH) / 2);
   };
 
   const startYA = getGroupStartY(pdusA);
@@ -153,7 +160,8 @@ const RackVisualizer: React.FC<Props> = ({
         ? TABLE_WIDTH + (PDU_COL_WIDTH - PDU_WIDTH) / 2
         : rackRightX + WIRE_GAP + ((PDU_COL_WIDTH - PDU_WIDTH) / 2);
 
-      return { x, y, width: PDU_WIDTH, height: getPDUHeight(totalSockets) };
+      // Add TOP_OFFSET to y
+      return { x, y: y + TOP_OFFSET, width: PDU_WIDTH, height: getPDUHeight(totalSockets) };
   };
 
   // --- Drag & Drop (Unchanged logic) ---
@@ -237,6 +245,11 @@ const RackVisualizer: React.FC<Props> = ({
     });
 
     const primaryPDU = pdus[0];
+
+    // UPS Calculation
+    const requiredVA = (totalMax / powerFactor) * 1.25; // 25% Headroom
+    const standardSizes = [1000, 1500, 2000, 2200, 3000, 5000, 6000, 8000, 10000, 15000, 20000, 30000, 40000, 50000];
+    const recommendedSize = standardSizes.find(s => s >= requiredVA) || (Math.ceil(requiredVA / 10000) * 10000);
 
     return (
         <div 
@@ -334,6 +347,34 @@ const RackVisualizer: React.FC<Props> = ({
                     </table>
                 </div>
 
+                {/* UPS Recommendations */}
+                <div>
+                    <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-2">UPS Recommendation</h3>
+                    <table className="w-full text-xs text-left bg-white border border-slate-200 rounded overflow-hidden">
+                        <tbody className="divide-y divide-slate-100">
+                             <tr>
+                                <td className="p-2 font-semibold text-slate-600">Total Load (VA)</td>
+                                <td className="p-2 font-mono text-slate-800">{Math.round(totalMax / powerFactor).toLocaleString()} VA</td>
+                            </tr>
+                            <tr>
+                                <td className="p-2 font-semibold text-slate-600">Rec. Capacity (+25%)</td>
+                                <td className="p-2 font-mono text-slate-800 font-bold">{Math.round(requiredVA).toLocaleString()} VA</td>
+                            </tr>
+                            <tr>
+                                <td className="p-2 font-semibold text-slate-600">Standard Unit</td>
+                                <td className="p-2 font-mono text-emerald-600 font-bold">{recommendedSize.toLocaleString()} VA</td>
+                            </tr>
+                             <tr>
+                                <td className="p-2 font-semibold text-slate-600">Min. Battery Runtime</td>
+                                <td className="p-2 font-mono text-slate-800">5 min @ Max Load</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                     <p className="text-[10px] text-slate-400 mt-1 px-1 italic">
+                        * Recommendation based on Total Max Load. For N+1, ensure 2x units of this capacity.
+                    </p>
+                </div>
+
                 <div className="mt-auto pt-8 text-xs text-slate-400">
                     <p>Generated by PDU Planner</p>
                     <p>{new Date().toLocaleDateString()}</p>
@@ -345,7 +386,7 @@ const RackVisualizer: React.FC<Props> = ({
 
   const renderRack = () => {
     const slots = [];
-    for (let u = RACK_U_COUNT; u >= 1; u--) {
+    for (let u = rackSize; u >= 1; u--) {
       const device = occupationMap.get(u);
       
       if (device && device.uPosition === u) {
@@ -380,10 +421,10 @@ const RackVisualizer: React.FC<Props> = ({
                     {/* Power Ratings & U Height - Aligned Right */}
                     <div className="flex gap-2 text-[10px] items-center shrink-0 ml-2 h-full">
                         <span className="text-blue-600 whitespace-nowrap leading-tight" title="Typical Power">
-                            T:{Math.round(device.typicalPower)}
+                            Typ:{Math.round(device.typicalPower)}
                         </span>
                         <span className="text-red-600 whitespace-nowrap leading-tight" title="Max Power">
-                            M:{Math.round(device.powerRatingPerDevice)}
+                            Max:{Math.round(device.powerRatingPerDevice)}
                         </span>
                         <span className="border border-slate-300 px-1 rounded whitespace-nowrap text-[9px] h-5 flex items-center justify-center text-slate-500 bg-slate-100 min-w-[20px] leading-tight">
                             {device.uHeight}U
@@ -419,12 +460,12 @@ const RackVisualizer: React.FC<Props> = ({
             key={`u-${u}`} 
             onDragOver={handleRackDragOver}
             onDrop={(e) => handleRackDrop(e, u)}
-            className="w-full border-b border-slate-200 flex items-center px-2 hover:bg-blue-50 transition-colors"
+            className="w-full border-b border-slate-700 flex items-center px-2 hover:bg-slate-700/50 transition-colors"
             style={{ height: `${U_HEIGHT_PX}px` }}
           >
-            <span className="text-slate-400 font-mono text-[10px] w-6 select-none">{u}</span>
+            <span className="text-slate-500 font-mono text-[10px] w-6 select-none">{u}</span>
             <div className="w-full h-full flex items-center justify-center opacity-0 hover:opacity-100">
-                 <div className="w-full h-px border-t border-dashed border-slate-300"></div>
+                 <div className="w-full h-px border-t border-dashed border-slate-500"></div>
             </div>
           </div>
         );
@@ -485,8 +526,9 @@ const RackVisualizer: React.FC<Props> = ({
     sortedDevices.forEach(d => {
         if (!d.uPosition) return;
 
-        const uTopY = (RACK_U_COUNT - d.uPosition) * U_HEIGHT_PX;
-        const deviceCenterY = RACK_HEADER_HEIGHT + uTopY + (d.uHeight * U_HEIGHT_PX / 2);
+        const uTopY = (rackSize - d.uPosition) * U_HEIGHT_PX;
+        // Added TOP_OFFSET here to match Rack vertical shift
+        const deviceCenterY = RACK_HEADER_HEIGHT + uTopY + (d.uHeight * U_HEIGHT_PX / 2) + TOP_OFFSET;
 
         Object.entries(d.psuConnections).forEach(([psuIdxStr, c]) => {
             const conn = c as PSUConnection | null;
@@ -526,20 +568,36 @@ const RackVisualizer: React.FC<Props> = ({
     });
 
     return (
-        <svg className="absolute inset-0 w-full h-full pointer-events-none z-50" width={totalWidth} height={RACK_HEIGHT_PX + 200}>
+        <svg className="absolute inset-0 w-full h-full pointer-events-none z-50" width={totalWidth} height={rackHeightPx + 200}>
             {lines}
         </svg>
     );
   };
 
+  const containerHeight = Math.max(rackHeightPx + 200, (unmountedDevices.length > 0 ? rackHeightPx + 400 : rackHeightPx + 200));
+
   return (
     <div 
         className={`relative ${THEME.bg} ${THEME.text} rounded-xl border ${THEME.border} select-none my-8 overflow-hidden`}
-        style={{ width: totalWidth, height: RACK_HEIGHT_PX + 200 }} 
+        style={{ width: totalWidth, height: containerHeight }} 
     >
       
       {/* Summary Table on Left */}
       {renderSummaryTable()}
+
+      {/* Rack Name Header */}
+      <div 
+        className="absolute z-10 text-center"
+        style={{ 
+            top: 20, 
+            left: rackLeftX, 
+            width: RACK_WIDTH,
+        }}
+      >
+          <h2 className="text-2xl font-bold text-slate-800 uppercase tracking-tight">
+              {devices[0]?.room || 'Rack Layout'}
+          </h2>
+      </div>
 
       {/* Render PDUs */}
       {pdus.map(pdu => {
@@ -553,7 +611,6 @@ const RackVisualizer: React.FC<Props> = ({
 
           return (
             <React.Fragment key={pdu.id}>
-                {/* Ruler removed as requested */}
                 <div 
                     className="absolute flex flex-col z-10"
                     style={{ 
@@ -563,10 +620,10 @@ const RackVisualizer: React.FC<Props> = ({
                         height: rect.height
                     }}
                 >
-                    <div className={`w-full flex flex-col items-center bg-white border ${isOverloaded ? 'border-red-500' : 'border-slate-300'} rounded-lg h-full shadow-sm`}>
+                    <div className={`w-full flex flex-col items-center bg-slate-900 border ${isOverloaded ? 'border-red-500' : 'border-slate-700'} rounded-lg h-full shadow-sm`}>
                         {/* Header */}
                         <div 
-                            className={`shrink-0 w-full flex flex-col items-center justify-center text-[10px] font-bold ${pdu.side === 'A' ? 'text-blue-600' : 'text-red-600'} border-b border-slate-200`}
+                            className={`shrink-0 w-full flex flex-col items-center justify-center text-[10px] font-bold ${pdu.side === 'A' ? 'text-blue-400' : 'text-red-400'} border-b border-slate-700`}
                             style={{ height: PDU_HEADER_H }}
                         >
                             <Zap size={12} fill="currentColor" />
@@ -580,13 +637,13 @@ const RackVisualizer: React.FC<Props> = ({
                         
                         {/* Footer / Load Bar */}
                         <div 
-                            className="shrink-0 w-full p-1 flex flex-col justify-end border-t border-slate-200"
+                            className="shrink-0 w-full p-1 flex flex-col justify-end border-t border-slate-700"
                             style={{ height: PDU_FOOTER_H }}
                         >
-                            <div className="w-full h-1 bg-slate-200 rounded-full overflow-hidden mb-1">
+                            <div className="w-full h-1 bg-slate-700 rounded-full overflow-hidden mb-1">
                                 <div className={`h-full ${isOverloaded ? 'bg-red-500' : (pdu.side === 'A' ? 'bg-blue-500' : 'bg-red-500')}`} style={{ width: `${pct}%` }}></div>
                             </div>
-                            <div className={`text-[9px] text-center ${isOverloaded ? 'text-red-600' : 'text-slate-500'}`}>{Math.round(load.max)}W</div>
+                            <div className={`text-[9px] text-center ${isOverloaded ? 'text-red-400' : 'text-slate-400'}`}>{Math.round(load.max)}W</div>
                         </div>
                     </div>
                 </div>
@@ -596,15 +653,41 @@ const RackVisualizer: React.FC<Props> = ({
 
       {/* Render Rack */}
       <div 
-        className={`absolute top-0 w-[420px] ${THEME.rackBg} border-x-4 ${THEME.rackBorder} z-20 flex flex-col shadow-lg`}
-        style={{ left: rackLeftX, height: RACK_HEIGHT_PX }}
+        className={`absolute w-[420px] ${THEME.rackBg} border-x-4 ${THEME.rackBorder} z-20 flex flex-col shadow-lg`}
+        style={{ left: rackLeftX, height: rackHeightPx, top: TOP_OFFSET }}
       >
-         <div className="h-4 shrink-0 bg-slate-300 w-full border-b border-slate-400"></div>
+         <div className="h-4 shrink-0 bg-slate-900 w-full border-b border-slate-700"></div>
          <div className="flex-1 flex flex-col w-full relative">
              {renderRack()}
          </div>
-         <div className="h-4 shrink-0 bg-slate-300 w-full border-t border-slate-400"></div>
+         <div className="h-4 shrink-0 bg-slate-900 w-full border-t border-slate-700"></div>
       </div>
+      
+      {/* Unmounted Devices Section */}
+      {unmountedDevices.length > 0 && (
+          <div 
+             className="absolute bg-slate-100 border border-slate-300 rounded-lg p-4 z-20 shadow-md flex flex-col gap-2"
+             style={{ 
+                left: rackLeftX, 
+                top: rackHeightPx + TOP_OFFSET + 40,
+                width: RACK_WIDTH 
+             }}
+          >
+             <h3 className="font-bold text-slate-700 text-sm flex items-center gap-2">
+                <AlertTriangle size={14} className="text-amber-500"/>
+                Unmounted Devices ({unmountedDevices.length})
+             </h3>
+             <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
+                 {unmountedDevices.map(d => (
+                     <div key={d.id} className="bg-white border border-slate-200 p-2 rounded text-xs flex justify-between items-center">
+                        <span className="font-semibold text-slate-800 truncate max-w-[180px]" title={d.name}>{d.name}</span>
+                        <span className="text-slate-500 font-mono">{d.powerRatingPerDevice}W | {d.uHeight}U</span>
+                     </div>
+                 ))}
+             </div>
+             <p className="text-[10px] text-slate-400">Not enough U space to mount automatically.</p>
+          </div>
+      )}
       
       {/* Render Cables Last (Top Layer) */}
       {renderCables()}
