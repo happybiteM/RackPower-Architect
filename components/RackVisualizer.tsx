@@ -335,6 +335,27 @@ const RackVisualizer: React.FC<Props> = ({
     });
 
     const primaryPDU = pdus[0];
+    const capacity = primaryPDU ? primaryPDU.powerCapacity : 0;
+
+    // Calculate Input Amps (Estimate based on capacity and phase)
+    let inputAmps = 0;
+    
+    if (isThreePhase) {
+        // 400V Calculation
+        inputAmps = Math.round(capacity / (Math.sqrt(3) * 400));
+    } else {
+        inputAmps = Math.round(capacity / 230);
+    }
+
+    // Determine Plug Type (Guess)
+    let plugType = "Hardwired / Unknown";
+    if (inputAmps <= 10) plugType = "C14 / NEMA 5-15";
+    else if (inputAmps <= 16) plugType = isThreePhase ? "IEC 60309 16A Red (3P+N+E)" : "IEC 60309 16A Blue (2P+E) / C20";
+    else if (inputAmps <= 32) plugType = isThreePhase ? "IEC 60309 32A Red (3P+N+E)" : "IEC 60309 32A Blue (2P+E)";
+    else if (inputAmps <= 63) plugType = isThreePhase ? "IEC 60309 63A Red (3P+N+E)" : "IEC 60309 63A Blue (2P+E)";
+    else plugType = "High Current / Busway";
+
+    const inputVoltageLabel = isThreePhase ? '400V (3-Phase)' : '230V (1-Phase)';
 
     // UPS Calculation
     const requiredVA = (totalMax / powerFactor) * 1.25; // 25% Headroom
@@ -353,38 +374,71 @@ const RackVisualizer: React.FC<Props> = ({
                 {/* PDU Specifications */}
                 <div>
                     <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-2">PDU Specs</h3>
-                    <table className="w-full text-xs text-left bg-white border border-slate-200 rounded overflow-hidden">
-                        <tbody className="divide-y divide-slate-100">
-                            <tr>
-                                <td className="p-2 font-semibold text-slate-600">Physical Height</td>
-                                <td className="p-2 font-mono text-slate-800">{pduPhysicalHeight} cm</td>
-                            </tr>
-                            <tr>
-                                <td className="p-2 font-semibold text-slate-600">Physical Width</td>
-                                <td className="p-2 font-mono text-slate-800">{pduPhysicalWidth} cm</td>
-                            </tr>
-                            <tr>
-                                <td className="p-2 font-semibold text-slate-600">Max Capacity</td>
-                                <td className="p-2 font-mono text-slate-800">{primaryPDU ? primaryPDU.powerCapacity : 0} W</td>
-                            </tr>
-                             <tr>
-                                <td className="p-2 font-semibold text-slate-600">Config</td>
-                                <td className="p-2 font-mono text-slate-800">{circuitCount}x {circuitRating}A Circuits</td>
-                            </tr>
-                             <tr>
-                                <td className="p-2 font-semibold text-slate-600">Phase</td>
-                                <td className="p-2 font-mono text-slate-800">{isThreePhase ? '3-Phase' : 'Single Phase'}</td>
-                            </tr>
-                            <tr>
-                                <td className="p-2 font-semibold text-slate-600">Voltage</td>
-                                <td className="p-2 font-mono text-slate-800">{voltage} V</td>
-                            </tr>
-                            <tr>
-                                <td className="p-2 font-semibold text-slate-600">Columns</td>
-                                <td className="p-2 font-mono text-slate-800">{pduCols}</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                    
+                    {/* Input Section */}
+                    <div className="mb-4">
+                        <div className="text-[10px] font-bold text-slate-400 uppercase mb-1 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span> Input
+                        </div>
+                        <table className="w-full text-xs text-left bg-white border border-slate-200 rounded overflow-hidden">
+                            <tbody className="divide-y divide-slate-100">
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Feed</td>
+                                    <td className="p-1.5 font-mono text-slate-800">{inputAmps}A</td>
+                                </tr>
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Voltage</td>
+                                    <td className="p-1.5 font-mono text-slate-800">{inputVoltageLabel}</td>
+                                </tr>
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Plug</td>
+                                    <td className="p-1.5 font-mono text-slate-800 truncate max-w-[140px]" title={plugType}>{plugType}</td>
+                                </tr>
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Capacity</td>
+                                    <td className="p-1.5 font-mono text-slate-800 font-bold">{(capacity / 1000).toFixed(1)} kW</td>
+                                </tr>
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Cord</td>
+                                    <td className="p-1.5 font-mono text-slate-800">{pduCordLength} m</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Output Section */}
+                    <div>
+                         <div className="text-[10px] font-bold text-slate-400 uppercase mb-1 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span> Output
+                        </div>
+                        <table className="w-full text-xs text-left bg-white border border-slate-200 rounded overflow-hidden">
+                            <tbody className="divide-y divide-slate-100">
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Voltage</td>
+                                    <td className="p-1.5 font-mono text-slate-800">230V</td>
+                                </tr>
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Breakers</td>
+                                    <td className="p-1.5 font-mono text-slate-800">{circuitCount}x {circuitRating}A</td>
+                                </tr>
+                                <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Form Factor</td>
+                                    <td className="p-1.5 font-mono text-slate-800">{pduCols === 1 ? 'Single' : 'Double'} Col</td>
+                                </tr>
+                                 <tr>
+                                    <td className="p-1.5 pl-2 font-semibold text-slate-600">Outlets</td>
+                                    <td className="p-1.5 font-mono text-slate-800">
+                                        {primaryPDU ? (
+                                            <div className="flex flex-col gap-0.5">
+                                                <span>{primaryPDU.socketCount}x {primaryPDU.socketType}</span>
+                                                {primaryPDU.secondarySocketCount ? <span>{primaryPDU.secondarySocketCount}x {primaryPDU.secondarySocketType}</span> : null}
+                                            </div>
+                                        ) : '-'}
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
 
                 <div>

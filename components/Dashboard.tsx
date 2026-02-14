@@ -46,16 +46,6 @@ const Dashboard: React.FC = () => {
   const [safetyMargin, setSafetyMargin] = useState(80);
   const [powerFactor, setPowerFactor] = useState(0.95);
 
-  // New Circuit & Voltage State
-  const [pduVoltage, setPduVoltage] = useState(230);
-  const [tempPduVoltage, setTempPduVoltage] = useState<number | string>(230);
-
-  const [pduCircuitCount, setPduCircuitCount] = useState(1);
-  const [tempPduCircuitCount, setTempPduCircuitCount] = useState<number | string>(1);
-
-  const [pduCircuitAmps, setPduCircuitAmps] = useState(32);
-  const [tempPduCircuitAmps, setTempPduCircuitAmps] = useState<number | string>(32);
-  
   const [socketType, setSocketType] = useState<SocketType>('C13');
   const [secondarySocketType, setSecondarySocketType] = useState<SocketType>('C19');
   
@@ -71,6 +61,29 @@ const Dashboard: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const configInputRef = useRef<HTMLInputElement>(null);
   const visualizerRef = useRef<HTMLDivElement>(null);
+
+  // --- Derived PDU Specs based on Capacity/Type ---
+  const pduSpecs = useMemo(() => {
+    switch (basePduCapacity) {
+        case 3680: // Standard 16A (3.6kW)
+            return { voltage: 230, circuits: 1, amps: 16, isThreePhase: false };
+        case 7360: // Standard 32A (7.3kW)
+            // Typically 2x 16A breakers
+            return { voltage: 230, circuits: 2, amps: 16, isThreePhase: false };
+        case 14400: // High Density 63A (14.4kW)
+            // Typically 4x 16A breakers
+            return { voltage: 230, circuits: 4, amps: 16, isThreePhase: false };
+        case 11000: // 3-Phase 16A (11kW)
+            // 3x 16A Phases
+            return { voltage: 230, circuits: 3, amps: 16, isThreePhase: true };
+        case 22000: // 3-Phase 32A (22kW)
+            // 6x 16A Breakers (2 per phase)
+            return { voltage: 230, circuits: 6, amps: 16, isThreePhase: true };
+        default:
+            // Custom or Unknown fallback
+            return { voltage: 230, circuits: 1, amps: 32, isThreePhase: false };
+    }
+  }, [basePduCapacity]);
 
   // --- Logic to Calculate Required PDUs ---
   
@@ -123,10 +136,6 @@ const Dashboard: React.FC = () => {
     return list;
   }, [activePduPairs, baseSocketsPerPDU, secondarySocketsPerPDU, basePduCapacity, socketType, secondarySocketType]);
 
-  const isThreePhase = useMemo(() => {
-      return PDU_VARIANTS.find(v => v.power === basePduCapacity)?.name.includes('3-Phase') || false;
-  }, [basePduCapacity]);
-
   // Helper: Get geometric Y position of a socket on a PDU
   // Used to find closest socket to device
   const getPDUSocketY = (
@@ -134,16 +143,28 @@ const Dashboard: React.FC = () => {
       socketIndex: number, 
       numPairs: number, 
       totalSocketsPerPDU: number, 
-      rackSizeU: number
+      rackSizeU: number,
+      cols: number,
+      circuits: number
   ) => {
-      // Logic duplicated from RackVisualizer for consistency
-      // Simplified estimation for auto-patching
-      const getPDUHeight = (socketCount: number) => {
-          const rows = Math.ceil(socketCount / pduCols);
-          const contentH = (rows * SOCKET_H) + ((rows - 1) * SOCKET_GAP);
-          return PDU_HEADER_H + SOCKET_PADDING + contentH + SOCKET_PADDING + PDU_FOOTER_H;
+      const socketsPerCircuit = Math.ceil(totalSocketsPerPDU / circuits);
+      const rows = Math.ceil(totalSocketsPerPDU / cols);
+
+      const getPDUHeight = () => {
+          let h = PDU_HEADER_H + SOCKET_PADDING;
+          for(let r=0; r<rows; r++) {
+              const firstS = r * cols;
+              // Matches Visualizer Logic for headers
+              const isStart = (firstS === 0) || (firstS > 0 && firstS % socketsPerCircuit === 0);
+              if (isStart) h += 24; // Header (20) + Margin (4)
+              h += SOCKET_H;
+              if (r < rows - 1) h += SOCKET_GAP;
+          }
+          h += SOCKET_PADDING + PDU_FOOTER_H;
+          return h;
       };
-      const singlePduHeight = getPDUHeight(totalSocketsPerPDU);
+
+      const singlePduHeight = getPDUHeight();
       const totalGroupHeight = (numPairs * singlePduHeight) + ((numPairs - 1) * PDU_VERTICAL_GAP);
       
       const rackHeightPx = (rackSizeU * U_HEIGHT_PX) + (RACK_HEADER_HEIGHT * 2);
@@ -152,89 +173,22 @@ const Dashboard: React.FC = () => {
       const pduTopY = startY + pduIndex * (singlePduHeight + PDU_VERTICAL_GAP);
       
       // Calculate specific row Y
-      const row = Math.floor(socketIndex / pduCols);
-      const socketOffset = PDU_HEADER_H + SOCKET_PADDING + (row * (SOCKET_H + SOCKET_GAP)) + (SOCKET_H / 2);
+      let currentY = PDU_HEADER_H + SOCKET_PADDING;
+      const targetRow = Math.floor(socketIndex / cols);
       
-      return pduTopY + socketOffset;
-  };
-
-  const optimizeWiring = (
-    devices: Device[], 
-    baseSockets: number
-  ) => {
-    // 1. Build a map of PDU -> list of { deviceId, psuIndex, uPos, socketIndex }
-    const pduMap: Record<string, { deviceId: string, psuIndex: number, uPos: number, socketIndex: number }[]> = {};
-
-    devices.forEach(d => {
-        if (!d.uPosition) return;
-        Object.entries(d.psuConnections).forEach(([psuIdxStr, conn]) => {
-            const c = conn as PSUConnection | null;
-            if (c) {
-                if (!pduMap[c.pduId]) pduMap[c.pduId] = [];
-                pduMap[c.pduId].push({
-                    deviceId: d.id,
-                    psuIndex: parseInt(psuIdxStr),
-                    uPos: d.uPosition!, 
-                    socketIndex: c.socketIndex
-                });
-            }
-        });
-    });
-
-    // 2. For each PDU, sort and re-assign
-    Object.keys(pduMap).forEach(pduId => {
-        const conns = pduMap[pduId];
-        
-        // Split into Primary (0..base-1) and Secondary (base..total-1)
-        // based on where they were *originally* placed (which respects type constraints).
-        const primaryConns = conns.filter(c => c.socketIndex < baseSockets);
-        const secondaryConns = conns.filter(c => c.socketIndex >= baseSockets);
-
-        // Sort by U Position Descending (Top devices first)
-        // If U positions equal, use original socket index to maintain stability
-        const sortFn = (a: any, b: any) => {
-            if (b.uPos !== a.uPos) return b.uPos - a.uPos;
-            return a.socketIndex - b.socketIndex;
-        };
-
-        primaryConns.sort(sortFn);
-        secondaryConns.sort(sortFn);
-
-        // Get the actual available socket slots that were used
-        const usedPrimarySockets = primaryConns.map(c => c.socketIndex).sort((a, b) => a - b);
-        const usedSecondarySockets = secondaryConns.map(c => c.socketIndex).sort((a, b) => a - b);
-
-        // Re-map: Connection N gets Socket N
-        primaryConns.forEach((c, i) => {
-             c.socketIndex = usedPrimarySockets[i]; 
-        });
-        secondaryConns.forEach((c, i) => {
-             c.socketIndex = usedSecondarySockets[i];
-        });
-    });
-
-    // 3. Reconstruct devices array with new assignments
-    const changes = new Map<string, Map<number, {pduId: string, socketIndex: number}>>();
-    
-    Object.entries(pduMap).forEach(([pduId, conns]) => {
-        conns.forEach(c => {
-            if (!changes.has(c.deviceId)) changes.set(c.deviceId, new Map());
-            changes.get(c.deviceId)!.set(c.psuIndex, { pduId, socketIndex: c.socketIndex });
-        });
-    });
-
-    return devices.map(d => {
-        if (!changes.has(d.id)) return d;
-        
-        const newPsuConns = { ...d.psuConnections };
-        const deviceChanges = changes.get(d.id)!;
-        
-        deviceChanges.forEach((newConn, psuIdx) => {
-            newPsuConns[psuIdx] = newConn;
-        });
-
-        return { ...d, psuConnections: newPsuConns };
-    });
+      for(let r=0; r<targetRow; r++) {
+           const firstS = r * cols;
+           const isStart = (firstS === 0) || (firstS > 0 && firstS % socketsPerCircuit === 0);
+           if (isStart) currentY += 24; // Header + Margin
+           currentY += SOCKET_H + SOCKET_GAP;
+      }
+      
+      // Add header for target row itself if applicable
+      const firstS = targetRow * cols;
+      const isStart = (firstS === 0) || (firstS > 0 && firstS % socketsPerCircuit === 0);
+      if (isStart) currentY += 24;
+      
+      return pduTopY + currentY + (SOCKET_H / 2);
   };
 
   // Helper: Shared Logic for Auto-Wiring
@@ -255,7 +209,8 @@ const Dashboard: React.FC = () => {
     circuitCount: number,
     circuitAmps: number,
     powerFactor: number,
-    safetyMargin: number
+    safetyMargin: number,
+    cols: number
   ) => {
     
     const socketsPerCircuit = Math.ceil(totalSocketsPerPDU / circuitCount);
@@ -332,7 +287,7 @@ const Dashboard: React.FC = () => {
                          // Check Circuit Limits
                          if (!checkCircuit(pduA, s, loadToAdd) || !checkCircuit(pduB, s, loadToAdd)) continue;
 
-                         const sY = getPDUSocketY(k, s, numPairs, totalSocketsPerPDU, rackSize);
+                         const sY = getPDUSocketY(k, s, numPairs, totalSocketsPerPDU, rackSize, cols, pduSpecs.circuits);
                          const dist = Math.abs(sY - deviceCenterY);
                          
                          if (dist < shortestDist) {
@@ -386,7 +341,7 @@ const Dashboard: React.FC = () => {
                                  
                                  if (!checkCircuit(pdu, s, loadToAdd)) continue;
 
-                                 const sY = getPDUSocketY(pdu.index, s, numPairs, totalSocketsPerPDU, rackSize);
+                                 const sY = getPDUSocketY(pdu.index, s, numPairs, totalSocketsPerPDU, rackSize, cols, pduSpecs.circuits);
                                  const dist = Math.abs(sY - deviceCenterY);
                                  if (dist < shortestDist) {
                                      shortestDist = dist;
@@ -458,7 +413,7 @@ const Dashboard: React.FC = () => {
 
                                if (!checkCircuit(pdu, s, loadToAdd)) continue;
 
-                               const sY = getPDUSocketY(pdu.index, s, numPairs, totalSocketsPerPDU, rackSize);
+                               const sY = getPDUSocketY(pdu.index, s, numPairs, totalSocketsPerPDU, rackSize, cols, pduSpecs.circuits);
                                const dist = Math.abs(sY - deviceCenterY);
                                if (dist < shortestDist) {
                                    shortestDist = dist;
@@ -484,8 +439,7 @@ const Dashboard: React.FC = () => {
         processedDevices.push(updated);
     }
 
-    // POST-PROCESSING: Optimize Wiring to Minimize Overlapping
-    return optimizeWiring(processedDevices, baseSocketsPerPDU);
+    return processedDevices;
   };
 
   // Initial Load & Auto-Patching when CSV changes
@@ -514,8 +468,8 @@ const Dashboard: React.FC = () => {
       }> = {};
       
       for(let i=0; i < numPairs; i++) {
-          pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i, circuitLoads: new Array(pduCircuitCount).fill(0) };
-          pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i, circuitLoads: new Array(pduCircuitCount).fill(0) };
+          pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
+          pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
       }
 
       let currentU = rackSize;
@@ -534,11 +488,12 @@ const Dashboard: React.FC = () => {
           numPairs, 
           effectiveCap, 
           totalSocketsPerPDU,
-          pduVoltage,
-          pduCircuitCount,
-          pduCircuitAmps,
+          pduSpecs.voltage,
+          pduSpecs.circuits,
+          pduSpecs.amps,
           powerFactor,
-          safetyMargin
+          safetyMargin,
+          pduCols
       );
 
       setActiveDevices(finalDevices);
@@ -567,8 +522,8 @@ const Dashboard: React.FC = () => {
     }> = {};
 
     for(let i=0; i < numPairs; i++) {
-        pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i, circuitLoads: new Array(pduCircuitCount).fill(0) };
-        pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i, circuitLoads: new Array(pduCircuitCount).fill(0) };
+        pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
+        pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
     }
 
     const finalDevices = runAutoConnect(
@@ -577,11 +532,12 @@ const Dashboard: React.FC = () => {
         numPairs, 
         effectiveCap, 
         totalSocketsPerPDU,
-        pduVoltage,
-        pduCircuitCount,
-        pduCircuitAmps,
+        pduSpecs.voltage,
+        pduSpecs.circuits,
+        pduSpecs.amps,
         powerFactor,
-        safetyMargin
+        safetyMargin,
+        pduCols
     );
     setActiveDevices(finalDevices);
   };
@@ -616,31 +572,6 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  const handleApplyCircuitConfig = () => {
-      const v = Number(tempPduVoltage);
-      const c = Number(tempPduCircuitCount);
-      const a = Number(tempPduCircuitAmps);
-
-      if (isNaN(v) || v < 100 || v > 480) {
-          alert("Invalid Voltage");
-          setTempPduVoltage(pduVoltage);
-          return;
-      }
-      if (isNaN(c) || c < 1 || c > 6) {
-          alert("Invalid Circuit Count (1-6)");
-          setTempPduCircuitCount(pduCircuitCount);
-          return;
-      }
-      if (isNaN(a) || a < 1 || a > 63) {
-          alert("Invalid Amperage (1-63)");
-          setTempPduCircuitAmps(pduCircuitAmps);
-          return;
-      }
-      setPduVoltage(v);
-      setPduCircuitCount(c);
-      setPduCircuitAmps(a);
-  };
-
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -664,11 +595,6 @@ const Dashboard: React.FC = () => {
                     if (config.socketType) setSocketType(config.socketType);
                     if (config.secondarySocketType) setSecondarySocketType(config.secondarySocketType);
                     
-                    // Circuit Configs
-                    if (config.pduVoltage) { setPduVoltage(config.pduVoltage); setTempPduVoltage(config.pduVoltage); }
-                    if (config.pduCircuitCount) { setPduCircuitCount(config.pduCircuitCount); setTempPduCircuitCount(config.pduCircuitCount); }
-                    if (config.pduCircuitAmps) { setPduCircuitAmps(config.pduCircuitAmps); setTempPduCircuitAmps(config.pduCircuitAmps); }
-
                     if (config.activeDevices) {
                         setActiveDevices(config.activeDevices);
                         updateDeviceTypes(config.activeDevices);
@@ -698,13 +624,6 @@ const Dashboard: React.FC = () => {
       setTempRackSize(48);
       setManualPduPairs(null);
       setPduCols(1);
-      
-      setPduVoltage(230);
-      setTempPduVoltage(230);
-      setPduCircuitCount(1);
-      setTempPduCircuitCount(1);
-      setPduCircuitAmps(32);
-      setTempPduCircuitAmps(32);
   };
   
   const handleDownloadTemplate = () => {
@@ -735,9 +654,6 @@ const Dashboard: React.FC = () => {
         powerFactor,
         socketType,
         secondarySocketType,
-        pduVoltage,
-        pduCircuitCount,
-        pduCircuitAmps,
         csvInput
     };
     const jsonString = JSON.stringify(config, null, 2);
@@ -1142,62 +1058,6 @@ const Dashboard: React.FC = () => {
                         </select>
                     </div>
 
-                    {/* PDU Circuit Configuration */}
-                    <div className="border-b border-slate-700 pb-3">
-                        <label className="text-xs text-slate-400 uppercase font-bold flex items-center gap-1 mb-2">
-                            <Zap size={12} className="text-yellow-400" />
-                            Circuit Breakers
-                        </label>
-                        <div className="space-y-2">
-                            <div>
-                                <span className="text-[10px] text-slate-500 block">Circuits per PDU</span>
-                                <select 
-                                    value={tempPduCircuitCount} 
-                                    onChange={e => setTempPduCircuitCount(e.target.value)}
-                                    className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm"
-                                >
-                                    <option value="1">1</option>
-                                    <option value="2">2</option>
-                                    <option value="3">3</option>
-                                    <option value="6">6</option>
-                                </select>
-                            </div>
-                            <div>
-                                <span className="text-[10px] text-slate-500 block">Max Amps per Circuit</span>
-                                <select 
-                                    value={tempPduCircuitAmps} 
-                                    onChange={e => setTempPduCircuitAmps(e.target.value)}
-                                    className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm"
-                                >
-                                    <option value="10">10 A</option>
-                                    <option value="13">13 A</option>
-                                    <option value="16">16 A</option>
-                                    <option value="20">20 A</option>
-                                    <option value="32">32 A</option>
-                                    <option value="63">63 A</option>
-                                </select>
-                            </div>
-                            <div>
-                                <span className="text-[10px] text-slate-500 block">System Voltage (V)</span>
-                                <select 
-                                    value={tempPduVoltage} 
-                                    onChange={e => setTempPduVoltage(e.target.value)}
-                                    className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm"
-                                >
-                                    <option value="110">110 V</option>
-                                    <option value="120">120 V</option>
-                                    <option value="208">208 V</option>
-                                    <option value="230">230 V</option>
-                                    <option value="240">240 V</option>
-                                    <option value="400">400 V</option>
-                                </select>
-                            </div>
-                            <button onClick={handleApplyCircuitConfig} className="w-full bg-blue-600 hover:bg-blue-500 text-white py-1 rounded text-xs font-bold mt-1">
-                                SET
-                            </button>
-                        </div>
-                    </div>
-
                     <div>
                         <label className="text-xs text-slate-400 uppercase font-bold">Total PDU Capacity</label>
                         <select 
@@ -1206,6 +1066,24 @@ const Dashboard: React.FC = () => {
                         >
                             {PDU_VARIANTS.map(v => <option key={v.power} value={v.power}>{v.name}</option>)}
                         </select>
+                    </div>
+
+                    {/* Inferred Specs Display */}
+                    <div className="border-b border-slate-700 pb-3 pt-2">
+                        <div className="text-[10px] uppercase font-bold text-slate-500 mb-1 flex items-center gap-1">
+                            <Zap size={10} className="text-yellow-500" />
+                            PDU Electrical Specs
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs text-slate-300">
+                             <div className="bg-slate-800 p-1.5 rounded border border-slate-700">
+                                 <div className="text-[9px] text-slate-500">Output Phase</div>
+                                 <div className="font-mono">{pduSpecs.voltage}V</div>
+                             </div>
+                             <div className="bg-slate-800 p-1.5 rounded border border-slate-700">
+                                 <div className="text-[9px] text-slate-500">Breakers</div>
+                                 <div className="font-mono">{pduSpecs.circuits}x {pduSpecs.amps}A</div>
+                             </div>
+                        </div>
                     </div>
 
                     {/* PDU Count Control */}
@@ -1347,10 +1225,10 @@ const Dashboard: React.FC = () => {
                         pduPhysicalWidth={pduPhysicalWidth}
                         pduCordLength={pduCordLength}
                         rackSize={rackSize}
-                        voltage={pduVoltage}
-                        circuitCount={pduCircuitCount}
-                        circuitRating={pduCircuitAmps}
-                        isThreePhase={isThreePhase}
+                        voltage={pduSpecs.voltage}
+                        circuitCount={pduSpecs.circuits}
+                        circuitRating={pduSpecs.amps}
+                        isThreePhase={pduSpecs.isThreePhase}
                         pduCols={pduCols}
                      />
                  ) : (
