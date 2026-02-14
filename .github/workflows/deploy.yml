@@ -31,5 +31,4 @@ jobs:
           username: ${{ secrets.HOSTINGER_FTP_USERNAME }}
           password: ${{ secrets.HOSTINGER_FTP_PASSWORD }}
           local-dir: ./dist/
-          port: 22
-          protocol: sftp
+          protocol: ftps
