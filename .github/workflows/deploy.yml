@@ -26,12 +26,11 @@ jobs:
         run: |
           npm run build
       
-      - name: Upload to Hostinger via SFTP
+      - name: Upload to Hostinger via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.4
         with:
           server: ${{ secrets.HOSTINGER_FTP_SERVER }}
           username: ${{ secrets.HOSTINGER_FTP_USERNAME }}
           password: ${{ secrets.HOSTINGER_FTP_PASSWORD }}
           local-dir: dist/
-          port: 22
-          protocol: sftp
+          port: 21
