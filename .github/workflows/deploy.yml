@@ -20,12 +20,10 @@ jobs:
       
       - name: Install dependencies
         run: |
-          cd RackPower-Architect
           npm install
       
       - name: Build the application
         run: |
-          cd RackPower-Architect
           npm run build
       
       - name: Upload to Hostinger via SFTP
@@ -34,6 +32,6 @@ jobs:
           server: ${{ secrets.HOSTINGER_FTP_SERVER }}
           username: ${{ secrets.HOSTINGER_FTP_USERNAME }}
           password: ${{ secrets.HOSTINGER_FTP_PASSWORD }}
-          local-dir: RackPower-Architect/dist/
+          local-dir: dist/
           port: 22
           protocol: sftp
