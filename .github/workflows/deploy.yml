@@ -32,7 +32,7 @@ jobs:
           server: ${{ secrets.HOSTINGER_FTP_SERVER }}
           username: ${{ secrets.HOSTINGER_FTP_USERNAME }}
           password: ${{ secrets.HOSTINGER_FTP_PASSWORD }}
-          local-dir: /home/u864352892/domains/rack.happybite.fun/public_html/
+          local-dir: /
           port: 21
           # Uncomment the following line for SFTP deployment
           # port: 22
