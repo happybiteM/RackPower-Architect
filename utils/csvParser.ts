@@ -1,6 +1,27 @@
 
 import { Device, RackGroup } from '../types';
 
+// Sanitize user input to prevent XSS attacks
+const sanitizeInput = (input: string): string => {
+  if (!input) return '';
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
+    .replace(/\//g, '&#x2F;');
+};
+
+// Generate cryptographically secure unique IDs
+const generateUniqueId = (): string => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback for older browsers
+  return `id-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+};
+
 export const parseCSV = (csvText: string): RackGroup[] => {
   const lines = csvText.trim().split('\n');
   if (lines.length < 2) return [];
@@ -22,7 +43,7 @@ export const parseCSV = (csvText: string): RackGroup[] => {
     return result;
   };
 
-  const headers = parseLine(lines[0]).map(h => h.replace(/^"|"$/g, '').trim());
+  const headers = parseLine(lines[0]).map(h => sanitizeInput(h.replace(/^"|"$/g, '').trim()));
   
   // Helper to find column index with multiple keywords
   const getColIndex = (keywords: string[]) => 
@@ -51,7 +72,7 @@ export const parseCSV = (csvText: string): RackGroup[] => {
     if (idxRoom !== -1) {
         const val = row[idxRoom];
         if (val && val.replace(/^"|"$/g, '').trim().length > 0) {
-            room = val.replace(/^"|"$/g, '').trim();
+            room = sanitizeInput(val.replace(/^"|"$/g, '').trim());
             lastRoom = room;
         } 
         // If empty, it stays as lastRoom (Fill Down)
@@ -60,7 +81,7 @@ export const parseCSV = (csvText: string): RackGroup[] => {
         room = 'Default Room';
     }
 
-    const deviceName = idxDevice !== -1 ? (row[idxDevice]?.replace(/^"|"$/g, '') || 'Unknown Device') : 'Unknown Device';
+    const deviceName = idxDevice !== -1 ? sanitizeInput(row[idxDevice]?.replace(/^"|"$/g, '') || 'Unknown Device') : 'Unknown Device';
     
     // Quantity Parsing
     let qty = 1;
@@ -99,11 +120,11 @@ export const parseCSV = (csvText: string): RackGroup[] => {
     let typicalPower = idxTypicalPower !== -1 ? parseFloat(row[idxTypicalPower]) : NaN;
     if (isNaN(typicalPower)) typicalPower = maxPower * 0.6; // Default to 60% if missing
 
-    const connectionType = idxConnType !== -1 ? (row[idxConnType]?.replace(/^"|"$/g, '') || 'C13') : 'C13';
+    const connectionType = idxConnType !== -1 ? sanitizeInput(row[idxConnType]?.replace(/^"|"$/g, '') || 'C13') : 'C13';
 
     for (let k = 0; k < qty; k++) {
       const device: Device = {
-        id: `${room}-${deviceName}-${i}-${k}`.replace(/\s+/g, '-'),
+        id: generateUniqueId(),
         name: deviceName,
         room,
         psuCount: psPerDevice,

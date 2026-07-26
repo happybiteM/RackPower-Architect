@@ -7,6 +7,7 @@ import { Device, PSUConnection, SocketType, PDUConfig } from '../types';
 import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus, Zap } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
+import DOMPurify from 'dompurify';
 
 // --- Geometry Constants (Must match RackVisualizer) ---
 const U_HEIGHT_PX = 30; 
@@ -547,7 +548,6 @@ const Dashboard: React.FC = () => {
     if (!isNaN(val) && val >= 4 && val <= 52) {
         setRackSize(Math.floor(val));
     } else {
-        alert("Please enter a valid integer between 4 and 52.");
         setTempRackSize(rackSize);
     }
   };
@@ -557,7 +557,6 @@ const Dashboard: React.FC = () => {
     if (!isNaN(val) && val >= 1 && val <= 100) {
         setBaseSocketsPerPDU(Math.floor(val));
     } else {
-        alert("Please enter a valid integer between 1 and 100.");
         setTempSockets(baseSocketsPerPDU);
     }
   };
@@ -567,21 +566,87 @@ const Dashboard: React.FC = () => {
     if (!isNaN(val) && val >= 0 && val <= 16) {
         setSecondarySocketsPerPDU(Math.floor(val));
     } else {
-        alert("Please enter a valid integer between 0 and 16.");
         setTempSecondarySockets(secondarySocketsPerPDU);
     }
+  };
+
+  // JSON schema validation for config files
+  interface ConfigSchema {
+    rackSize?: number;
+    baseSocketsPerPDU?: number;
+    secondarySocketsPerPDU?: number;
+    pduCols?: number;
+    pduPhysicalHeight?: number;
+    pduPhysicalWidth?: number;
+    pduCordLength?: number;
+    basePduCapacity?: number;
+    safetyMargin?: number;
+    powerFactor?: number;
+    socketType?: SocketType;
+    secondarySocketType?: SocketType;
+    activeDevices?: Device[];
+    csvInput?: string;
+  }
+
+  const validateConfigSchema = (config: any): config is ConfigSchema => {
+    if (typeof config !== 'object' || config === null) return false;
+    
+    // Validate numeric fields with reasonable ranges
+    if (config.rackSize !== undefined && (typeof config.rackSize !== 'number' || config.rackSize < 4 || config.rackSize > 52)) return false;
+    if (config.baseSocketsPerPDU !== undefined && (typeof config.baseSocketsPerPDU !== 'number' || config.baseSocketsPerPDU < 1 || config.baseSocketsPerPDU > 100)) return false;
+    if (config.secondarySocketsPerPDU !== undefined && (typeof config.secondarySocketsPerPDU !== 'number' || config.secondarySocketsPerPDU < 0 || config.secondarySocketsPerPDU > 16)) return false;
+    if (config.pduCols !== undefined && (typeof config.pduCols !== 'number' || config.pduCols < 1 || config.pduCols > 16)) return false;
+    if (config.pduPhysicalHeight !== undefined && (typeof config.pduPhysicalHeight !== 'number' || config.pduPhysicalHeight < 0 || config.pduPhysicalHeight > 500)) return false;
+    if (config.pduPhysicalWidth !== undefined && (typeof config.pduPhysicalWidth !== 'number' || config.pduPhysicalWidth < 0 || config.pduPhysicalWidth > 100)) return false;
+    if (config.pduCordLength !== undefined && (typeof config.pduCordLength !== 'number' || config.pduCordLength < 0 || config.pduCordLength > 100)) return false;
+    if (config.basePduCapacity !== undefined && (typeof config.basePduCapacity !== 'number' || config.basePduCapacity < 0 || config.basePduCapacity > 50000)) return false;
+    if (config.safetyMargin !== undefined && (typeof config.safetyMargin !== 'number' || config.safetyMargin < 0 || config.safetyMargin > 100)) return false;
+    if (config.powerFactor !== undefined && (typeof config.powerFactor !== 'number' || config.powerFactor < 0 || config.powerFactor > 1)) return false;
+    
+    // Validate socket types
+    const validSocketTypes = ['UK', 'C13', 'C19'];
+    if (config.socketType !== undefined && !validSocketTypes.includes(config.socketType)) return false;
+    if (config.secondarySocketType !== undefined && !validSocketTypes.includes(config.secondarySocketType)) return false;
+    
+    // Validate activeDevices array structure (basic check)
+    if (config.activeDevices !== undefined) {
+      if (!Array.isArray(config.activeDevices)) return false;
+      for (const device of config.activeDevices) {
+        if (typeof device !== 'object' || device === null) return false;
+        if (typeof device.id !== 'string') return false;
+        if (typeof device.name !== 'string') return false;
+        if (typeof device.room !== 'string') return false;
+      }
+    }
+    
+    return true;
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      // Validate file type by checking MIME type and extension
+      const fileName = file.name.toLowerCase();
+      const isJson = fileName.endsWith('.json');
+      const isCsv = fileName.endsWith('.csv');
+      
+      if (!isJson && !isCsv) {
+        return; // Invalid file type, silently ignore
+      }
+      
       const reader = new FileReader();
       reader.onload = (evt) => {
         if (evt.target?.result) {
             const content = evt.target.result as string;
-            if (file.name.toLowerCase().endsWith('.json')) {
+            if (isJson) {
                 try {
                     const config = JSON.parse(content);
+                    
+                    // Schema validation
+                    if (!validateConfigSchema(config)) {
+                        return; // Invalid schema, silently ignore
+                    }
+                    
                     if (config.rackSize) { setRackSize(config.rackSize); setTempRackSize(config.rackSize); }
                     if (config.baseSocketsPerPDU) { setBaseSocketsPerPDU(config.baseSocketsPerPDU); setTempSockets(config.baseSocketsPerPDU); }
                     if (config.secondarySocketsPerPDU !== undefined) { setSecondarySocketsPerPDU(config.secondarySocketsPerPDU); setTempSecondarySockets(config.secondarySocketsPerPDU); }
@@ -600,8 +665,7 @@ const Dashboard: React.FC = () => {
                         updateDeviceTypes(config.activeDevices);
                     }
                 } catch (err) {
-                    alert('Failed to parse JSON configuration file.');
-                    console.error(err);
+                    // Silently ignore parse errors
                 }
             } else {
                 setCsvInput(content);
@@ -626,15 +690,22 @@ const Dashboard: React.FC = () => {
       setPduCols(1);
   };
   
-  const handleDownloadTemplate = () => {
-    const blob = new Blob([DEFAULT_CSV], { type: 'text/csv;charset=utf-8;' });
+  // Helper to safely create and revoke object URLs
+  const createAndRevokeObjectURL = (blob: Blob, filename: string): void => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', 'rack_import_template.csv');
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    // Revoke the object URL to prevent memory leaks
+    setTimeout(() => URL.revokeObjectURL(url), 100);
+  };
+
+  const handleDownloadTemplate = () => {
+    const blob = new Blob([DEFAULT_CSV], { type: 'text/csv;charset=utf-8;' });
+    createAndRevokeObjectURL(blob, 'rack_import_template.csv');
   };
 
   const handlePrint = () => window.print();
@@ -658,11 +729,7 @@ const Dashboard: React.FC = () => {
     };
     const jsonString = JSON.stringify(config, null, 2);
     const blob = new Blob([jsonString], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'rack_config.json';
-    link.click();
+    createAndRevokeObjectURL(blob, 'rack_config.json');
     setShowExportMenu(false);
   };
 
@@ -675,7 +742,7 @@ const Dashboard: React.FC = () => {
           });
           return dataUrl;
       } catch (err) {
-          console.error("Export failed", err);
+          // Silently handle export errors in production
           return null;
       }
   };
@@ -715,6 +782,12 @@ const Dashboard: React.FC = () => {
   const exportHTML = async () => {
       const dataUrl = await captureVisualizer();
       if (!dataUrl) return;
+      
+      // Sanitize device names to prevent XSS in exported HTML
+      const sanitizeForHtml = (str: string): string => {
+        return DOMPurify.sanitize(str, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] });
+      };
+      
       const htmlContent = `
         <!DOCTYPE html>
         <html>
@@ -746,7 +819,7 @@ const Dashboard: React.FC = () => {
                     <tbody>
                         ${activeDevices.map(d => `
                             <tr>
-                                <td>${d.name}</td>
+                                <td>${sanitizeForHtml(d.name)}</td>
                                 <td>${d.uHeight}U</td>
                                 <td>${d.psuCount}</td>
                                 <td>${d.powerRatingPerDevice}W</td>
@@ -759,10 +832,7 @@ const Dashboard: React.FC = () => {
         </html>
       `;
       const blob = new Blob([htmlContent], { type: 'text/html' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = 'rack_report.html';
-      link.click();
+      createAndRevokeObjectURL(blob, 'rack_report.html');
       setShowExportMenu(false);
   };
 
