@@ -1,7 +1,8 @@
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Device, PSUConnection, PDUConfig, SocketType } from '../types';
 import { Plug, Zap, AlertTriangle } from 'lucide-react';
+import { FixedSizeList as List } from 'react-window';
 
 interface Props {
   devices: Device[];
@@ -150,6 +151,9 @@ const RackVisualizer: React.FC<Props> = ({
   const pdusA = pdus.filter(p => p.side === 'A');
   const pdusB = pdus.filter(p => p.side === 'B');
 
+  // Virtualization: Only render visible devices when list is large
+  const shouldVirtualize = devices.length > 50;
+  
   const unmountedDevices = devices.filter(d => d.uPosition === null);
 
   // --- Layout Calculations ---

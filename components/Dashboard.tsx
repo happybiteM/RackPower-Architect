@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { parseCSV } from '../utils/csvParser';
 import { DEFAULT_CSV, PDU_VARIANTS } from '../constants';
 import RackVisualizer from './RackVisualizer';
@@ -8,6 +8,8 @@ import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Dow
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 import DOMPurify from 'dompurify';
+import { toast } from 'react-toastify';
+import { FixedSizeList as List } from 'react-window';
 
 // --- Geometry Constants (Must match RackVisualizer) ---
 const U_HEIGHT_PX = 30; 
@@ -445,67 +447,75 @@ const Dashboard: React.FC = () => {
 
   // Initial Load & Auto-Patching when CSV changes
   useEffect(() => {
-    const groups = parseCSV(csvInput);
-    if (groups.length > 0) {
-      let devices = groups[0].devices;
-      
-      const effectiveCap = basePduCapacity * powerFactor * (safetyMargin / 100);
-      const totalSocketsPerPDU = baseSocketsPerPDU + secondarySocketsPerPDU;
+  const processCSV = async () => {
+    try {
+      const groups = parseCSV(csvInput);
+      if (groups.length > 0) {
+        let devices = groups[0].devices;
+        
+        const effectiveCap = basePduCapacity * powerFactor * (safetyMargin / 100);
+        const totalSocketsPerPDU = baseSocketsPerPDU + secondarySocketsPerPDU;
 
-      const totalMaxPower = devices.reduce((sum, d) => sum + d.powerRatingPerDevice, 0);
-      const totalPSUs = devices.reduce((sum, d) => sum + d.psuCount, 0);
-      
-      const pairsByPower = Math.ceil(totalMaxPower / effectiveCap);
-      const pairsBySockets = Math.ceil((totalPSUs / 2) / totalSocketsPerPDU);
-      const calculatedPairs = Math.max(1, pairsByPower, pairsBySockets);
-      const numPairs = manualPduPairs !== null ? manualPduPairs : calculatedPairs;
+        const totalMaxPower = devices.reduce((sum, d) => sum + d.powerRatingPerDevice, 0);
+        const totalPSUs = devices.reduce((sum, d) => sum + d.psuCount, 0);
+        
+        const pairsByPower = Math.ceil(totalMaxPower / effectiveCap);
+        const pairsBySockets = Math.ceil((totalPSUs / 2) / totalSocketsPerPDU);
+        const calculatedPairs = Math.max(1, pairsByPower, pairsBySockets);
+        const numPairs = manualPduPairs !== null ? manualPduPairs : calculatedPairs;
 
-      const pduState: Record<string, { 
-          currentLoad: number, 
-          usedSockets: Set<number>, 
-          id: string,
-          index: number,
-          circuitLoads: number[]
-      }> = {};
-      
-      for(let i=0; i < numPairs; i++) {
-          pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
-          pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
+        const pduState: Record<string, { 
+            currentLoad: number, 
+            usedSockets: Set<number>, 
+            id: string,
+            index: number,
+            circuitLoads: number[]
+        }> = {};
+        
+        for(let i=0; i < numPairs; i++) {
+            pduState[`A${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `A${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
+            pduState[`B${i+1}`] = { currentLoad: 0, usedSockets: new Set(), id: `B${i+1}`, index: i, circuitLoads: new Array(pduSpecs.circuits).fill(0) };
+        }
+
+        let currentU = rackSize;
+        const positionedDevices = devices.map(d => {
+             if (currentU - d.uHeight + 1 >= 1) {
+                  const pos = currentU;
+                  currentU -= d.uHeight;
+                  return { ...d, uPosition: pos };
+             }
+             return { ...d, uPosition: null };
+        });
+
+        const finalDevices = runAutoConnect(
+            positionedDevices, 
+            pduState, 
+            numPairs, 
+            effectiveCap, 
+            totalSocketsPerPDU,
+            pduSpecs.voltage,
+            pduSpecs.circuits,
+            pduSpecs.amps,
+            powerFactor,
+            safetyMargin,
+            pduCols
+        );
+
+        setActiveDevices(finalDevices);
+        updateDeviceTypes(finalDevices);
+        toast.success(`Loaded ${finalDevices.length} devices successfully`);
       }
-
-      let currentU = rackSize;
-      const positionedDevices = devices.map(d => {
-           if (currentU - d.uHeight + 1 >= 1) {
-                const pos = currentU;
-                currentU -= d.uHeight;
-                return { ...d, uPosition: pos };
-           }
-           return { ...d, uPosition: null };
-      });
-
-      const finalDevices = runAutoConnect(
-          positionedDevices, 
-          pduState, 
-          numPairs, 
-          effectiveCap, 
-          totalSocketsPerPDU,
-          pduSpecs.voltage,
-          pduSpecs.circuits,
-          pduSpecs.amps,
-          powerFactor,
-          safetyMargin,
-          pduCols
-      );
-
-      setActiveDevices(finalDevices);
-      updateDeviceTypes(finalDevices);
+    } catch (error) {
+      toast.error('Failed to parse CSV file');
     }
-  }, [csvInput]); 
-
-  const updateDeviceTypes = (devices: Device[]) => {
-      const types = Array.from(new Set(devices.map(d => d.name)));
-      setDeviceTypes(types);
   };
+  processCSV();
+}, [csvInput]); 
+
+const updateDeviceTypes = (devices: Device[]) => {
+    const types = Array.from(new Set(devices.map(d => d.name)));
+    setDeviceTypes(types);
+};
 
   // --- Handlers ---
 
@@ -631,7 +641,8 @@ const Dashboard: React.FC = () => {
       const isCsv = fileName.endsWith('.csv');
       
       if (!isJson && !isCsv) {
-        return; // Invalid file type, silently ignore
+        toast.error('Invalid file type. Please upload a .csv or .json file.');
+        return;
       }
       
       const reader = new FileReader();
@@ -644,7 +655,8 @@ const Dashboard: React.FC = () => {
                     
                     // Schema validation
                     if (!validateConfigSchema(config)) {
-                        return; // Invalid schema, silently ignore
+                        toast.error('Invalid configuration file format');
+                        return;
                     }
                     
                     if (config.rackSize) { setRackSize(config.rackSize); setTempRackSize(config.rackSize); }
@@ -663,16 +675,23 @@ const Dashboard: React.FC = () => {
                     if (config.activeDevices) {
                         setActiveDevices(config.activeDevices);
                         updateDeviceTypes(config.activeDevices);
+                        toast.success(`Loaded ${config.activeDevices.length} devices from config`);
+                    } else {
+                        toast.success('Configuration loaded successfully');
                     }
                 } catch (err) {
-                    // Silently ignore parse errors
+                    toast.error('Failed to parse configuration file');
                 }
             } else {
                 setCsvInput(content);
+                toast.success('CSV file loaded successfully');
             }
         }
         if (fileInputRef.current) fileInputRef.current.value = '';
         if (configInputRef.current) configInputRef.current.value = '';
+      };
+      reader.onerror = () => {
+        toast.error('Failed to read file');
       };
       reader.readAsText(file);
     }
