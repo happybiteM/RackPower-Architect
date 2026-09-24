@@ -2,7 +2,7 @@
 import React, { useState, useMemo } from 'react';
 import { Device, PSUConnection, PDUConfig, SocketType } from '../types';
 import { Plug, Zap, AlertTriangle } from 'lucide-react';
-import { FixedSizeList as List } from 'react-window';
+import { List } from 'react-window';
 
 interface Props {
   devices: Device[];
@@ -41,9 +41,10 @@ const SOCKET_PADDING = 8;
 const CIRCUIT_HEADER_HEIGHT = 20;
 const CIRCUIT_HEADER_MARGIN = 4;
 
-// Updated Styles for White Background (Paper Mode)
+// The diagram always renders on a "paper" (white) background so exports stay
+// consistent in both light and dark app themes.
 const THEME = {
-  bg: 'bg-white',
+  bg: 'bg-white themed-diagram',
   text: 'text-slate-900',
   textDim: 'text-slate-600',
   border: 'border-slate-300',
@@ -53,6 +54,56 @@ const THEME = {
   deviceBorder: 'border-slate-400',
   deviceHover: 'hover:bg-slate-200',
   rail: 'bg-slate-950' // Dark rails
+};
+
+interface VirtualDeviceRowProps {
+  items: Device[];
+  draggedDevice: string | null;
+  onDeviceDragStart: (e: React.DragEvent, device: Device) => void;
+  onCableDragStart: (e: React.DragEvent, deviceId: string, psuIndex: number) => void;
+}
+
+/** Single row of the virtualized unmounted-device list (react-window v2 API) */
+type VirtualDeviceRowBaseProps = { index: number; style: React.CSSProperties };
+
+const VirtualDeviceRow = ({
+  index,
+  style,
+  items,
+  draggedDevice,
+  onDeviceDragStart,
+  onCableDragStart,
+}: VirtualDeviceRowBaseProps & VirtualDeviceRowProps) => {
+  const d = items[index];
+  if (!d) return null;
+  return (
+    <div style={style}>
+      <div
+        key={d.id}
+        draggable
+        onDragStart={(e) => onDeviceDragStart(e, d)}
+        className={`bg-white border border-slate-200 p-2 rounded text-xs flex justify-between items-center cursor-grab active:cursor-grabbing ${draggedDevice === d.id ? 'opacity-50 border-blue-500 border-dashed' : ''}`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-semibold text-slate-800 truncate max-w-[180px]" title={d.name}>{d.name}</span>
+          <div className="flex gap-1 shrink-0">
+            {Array.from({ length: d.psuCount }).map((_, idx) => (
+              <span
+                key={idx}
+                draggable
+                onDragStart={(e) => { e.stopPropagation(); onCableDragStart(e, d.id, idx); }}
+                className={`w-4 h-4 rounded flex items-center justify-center cursor-pointer ${d.psuConnections[idx] ? 'bg-emerald-600 text-white' : 'bg-slate-300 text-slate-500'}`}
+                title={`PSU #${idx + 1} - Drag to PDU`}
+              >
+                <Plug size={9} />
+              </span>
+            ))}
+          </div>
+        </div>
+        <span className="text-slate-500 font-mono">{d.powerRatingPerDevice}W | {d.uHeight}U</span>
+      </div>
+    </div>
+  );
 };
 
 const SocketIcon = ({ type, used, label, hovered, labelSide = 'left' }: { type: SocketType, used: boolean, label: string, hovered: boolean, labelSide?: 'left' | 'right' }) => {
@@ -913,14 +964,50 @@ const RackVisualizer: React.FC<Props> = ({
                 <AlertTriangle size={14} className="text-amber-500"/>
                 Unmounted Devices ({unmountedDevices.length})
              </h3>
-             <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
-                 {unmountedDevices.map(d => (
-                     <div key={d.id} className="bg-white border border-slate-200 p-2 rounded text-xs flex justify-between items-center">
-                        <span className="font-semibold text-slate-800 truncate max-w-[180px]" title={d.name}>{d.name}</span>
-                        <span className="text-slate-500 font-mono">{d.powerRatingPerDevice}W | {d.uHeight}U</span>
-                     </div>
-                 ))}
-             </div>
+             {shouldVirtualize ? (
+               <List
+                 rowComponent={VirtualDeviceRow}
+                 rowCount={unmountedDevices.length}
+                 rowHeight={44}
+                 rowProps={{
+                   items: unmountedDevices,
+                   draggedDevice,
+                   onDeviceDragStart: handleDeviceDragStart,
+                   onCableDragStart: handleCableDragStart,
+                 }}
+                 style={{ maxHeight: 192, overflowY: 'auto' }}
+                 aria-label="Unmounted devices"
+               />
+             ) : (
+               <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
+                   {unmountedDevices.map(d => (
+                       <div
+                         key={d.id}
+                         draggable
+                         onDragStart={(e) => handleDeviceDragStart(e, d)}
+                         className={`bg-white border border-slate-200 p-2 rounded text-xs flex justify-between items-center cursor-grab active:cursor-grabbing ${draggedDevice === d.id ? 'opacity-50 border-blue-500 border-dashed' : ''}`}
+                       >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-semibold text-slate-800 truncate max-w-[180px]" title={d.name}>{d.name}</span>
+                            <div className="flex gap-1 shrink-0">
+                              {Array.from({ length: d.psuCount }).map((_, idx) => (
+                                <span
+                                  key={idx}
+                                  draggable
+                                  onDragStart={(e) => { e.stopPropagation(); handleCableDragStart(e, d.id, idx); }}
+                                  className={`w-4 h-4 rounded flex items-center justify-center cursor-pointer ${d.psuConnections[idx] ? 'bg-emerald-600 text-white' : 'bg-slate-300 text-slate-500'}`}
+                                  title={`PSU #${idx + 1} - Drag to PDU`}
+                                >
+                                  <Plug size={9} />
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <span className="text-slate-500 font-mono">{d.powerRatingPerDevice}W | {d.uHeight}U</span>
+                       </div>
+                   ))}
+               </div>
+             )}
              <p className="text-[10px] text-slate-400">Not enough U space to mount automatically.</p>
           </div>
       )}
