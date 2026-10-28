@@ -857,8 +857,8 @@ const updateDeviceTypes = (devices: Device[]) => {
                         uHeight: t.uHeight !== undefined
                           ? Math.max(0, Math.floor(t.uHeight))
                           : (t.formFactor === 'horizontal'
-                              ? Math.max(1, Math.ceil(Math.max(0.1, (t.physicalHeightCm ?? 4.4)) * 10 / 44.45)))
-                          : 0,
+                              ? Math.max(1, Math.ceil(Math.max(0.1, (t.physicalHeightCm ?? 4.4)) * 10 / 44.45))
+                              : 0),
                         physicalWidthCm: Math.max(1, t.physicalWidthCm ?? 5.5),
                         physicalDepthCm: Math.max(1, t.physicalDepthCm ?? 7.5),
                         cols: Math.max(1, Math.min(2, Math.round(t.cols ?? 1))),
