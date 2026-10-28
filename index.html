@@ -8,14 +8,68 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+      /* ---- Theme variables (dark is default) ---- */
+      :root, [data-theme="dark"] {
+        --bg-app: #0f172a;
+        --text-app: #e2e8f0;
+        --panel-bg: #0f172a;
+        --panel-border: rgba(148, 163, 184, 0.15);
+        --card-bg: #1e293b;
+        --card-border: #334155;
+        --input-bg: #1e293b;
+        --input-border: #334155;
+        --muted-text: #94a3b8;
+        --dim-text: #64748b;
+        --diagram-bg: #ffffff;
+        --diagram-text: #0f172a;
+        --tab-active-bg: #1e293b;
+        --tab-active-text: #ffffff;
+        --tab-inactive-text: #94a3b8;
+      }
+      [data-theme="light"] {
+        --bg-app: #f1f5f9;
+        --text-app: #0f172a;
+        --panel-bg: #ffffff;
+        --panel-border: rgba(15, 23, 42, 0.1);
+        --card-bg: #ffffff;
+        --card-border: #cbd5e1;
+        --input-bg: #f8fafc;
+        --input-border: #cbd5e1;
+        --muted-text: #475569;
+        --dim-text: #64748b;
+        --diagram-bg: #ffffff;
+        --diagram-text: #0f172a;
+        --tab-active-bg: #ffffff;
+        --tab-active-text: #0f172a;
+        --tab-inactive-text: #64748b;
+      }
+
       body {
         font-family: 'Inter', sans-serif;
-        background-color: #0f172a;
-        color: #e2e8f0;
+        background-color: var(--bg-app);
+        color: var(--text-app);
+        transition: background-color 0.2s ease, color 0.2s ease;
       }
       .font-mono {
         font-family: 'JetBrains Mono', monospace;
       }
+
+      /* ---- Themed utility classes (override Tailwind CDN in light mode) ---- */
+      .themed-app { background-color: var(--bg-app) !important; color: var(--text-app) !important; }
+      .themed-panel { background-color: var(--panel-bg) !important; border-color: var(--panel-border) !important; }
+      .themed-card { background-color: var(--card-bg) !important; border-color: var(--card-border) !important; }
+      .themed-input { background-color: var(--input-bg) !important; border-color: var(--input-border) !important; color: var(--text-app) !important; }
+      .themed-muted { color: var(--muted-text) !important; }
+      .themed-dim { color: var(--dim-text) !important; }
+      .themed-diagram { background-color: var(--diagram-bg) !important; color: var(--diagram-text) !important; }
+      .themed-heading { color: var(--text-app) !important; }
+      .themed-divider { border-color: var(--card-border) !important; }
+      .themed-tab-active { background-color: var(--tab-active-bg) !important; color: var(--tab-active-text) !important; }
+      .themed-tab-inactive { color: var(--tab-inactive-text) !important; }
+      .themed-modal { background-color: var(--panel-bg) !important; border-color: var(--card-border) !important; }
+      [data-theme="light"] .shadow-lg, [data-theme="light"] .shadow-xl { box-shadow: 0 1px 3px rgba(15,23,42,0.12), 0 1px 2px rgba(15,23,42,0.06) !important; }
+      [data-theme="light"] .bg-slate-950.themed-diagram { background-color: var(--diagram-bg) !important; }
 
       @media print {
         @page {

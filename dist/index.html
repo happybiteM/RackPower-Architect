@@ -1,0 +1,73 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDU Power Planner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+      body {
+        font-family: 'Inter', sans-serif;
+        background-color: #0f172a;
+        color: #e2e8f0;
+      }
+      .font-mono {
+        font-family: 'JetBrains Mono', monospace;
+      }
+      @media print {
+        @page {
+          margin: 0.5cm;
+          size: landscape;
+        }
+        body {
+          background-color: white !important;
+          color: black !important;
+        }
+        .bg-slate-950 {
+          background-color: white !important;
+        }
+        header, aside, .no-print {
+          display: none !important;
+        }
+        main {
+          display: block !important;
+          width: 100% !important;
+        }
+        .lg\:col-span-3 {
+          width: 100% !important;
+        }
+        /* Ensure background colors for diagrams are preserved */
+        * {
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+        /* Avoid breaking diagrams across pages */
+        .break-inside-avoid {
+          break-inside: avoid;
+        }
+      }
+    </style>
+
+<link rel="stylesheet" href="/index.css">
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.563.0",
+    "html2canvas": "https://esm.sh/html2canvas@1.4.1",
+    "html-to-image": "https://esm.sh/html-to-image@1.11.11",
+    "jspdf": "https://esm.sh/jspdf@2.5.1"
+  }
+}
+</script>
+  <script type="module" crossorigin src="/assets/index-C2vr5ukt.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-tlSLHgLC.css">
+</head>
+  <body>
+    <div id="root"></div>
+</body>
+</html>

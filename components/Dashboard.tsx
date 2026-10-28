@@ -3,13 +3,18 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { parseCSV } from '../utils/csvParser';
 import { DEFAULT_CSV, PDU_VARIANTS } from '../constants';
 import RackVisualizer from './RackVisualizer';
-import { Device, PSUConnection, SocketType, PDUConfig } from '../types';
-import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus, Zap } from 'lucide-react';
+import { Device, PSUConnection, SocketType, PDUConfig, PhysicalDimensions, RACK_SIZES, CORD_BEND_CM, PduPlacementStrategy } from '../types';
+import { calculatePduPlacement, DEFAULT_DEVICE_DIM, pduRequiredU } from '../utils/placement';
+import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus, Zap, Sun, Moon, LayoutDashboard, Boxes, ClipboardList, AlertTriangle } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 import DOMPurify from 'dompurify';
 import { toast } from 'react-toastify';
-import { FixedSizeList as List } from 'react-window';
+import { useTheme } from '../utils/theme';
+
+type TabId = 'config' | 'wiring' | 'reports';
+
+const TAB_STORAGE_KEY = 'rack-planner-active-tab';
 
 // --- Geometry Constants (Must match RackVisualizer) ---
 const U_HEIGHT_PX = 30; 
@@ -45,6 +50,14 @@ const Dashboard: React.FC = () => {
   const [pduPhysicalWidth, setPduPhysicalWidth] = useState<number>(5.5); // cm
   const [pduCordLength, setPduCordLength] = useState<number>(3); // meters
 
+  // Rack-mount PDU placement configuration
+  const [rackPreset, setRackPreset] = useState<string>('48U');
+  const [rackDepth, setRackDepth] = useState<number>(120); // cm (external)
+  const [pduVertSpaceU, setPduVertSpaceU] = useState<number>(0); // 0 = auto
+  const [pduInletType, setPduInletType] = useState<keyof typeof CORD_BEND_CM>('C14');
+  const [placementStrategy, setPlacementStrategy] = useState<PduPlacementStrategy>('bottom');
+  const [deviceDims, setDeviceDims] = useState<Record<string, PhysicalDimensions>>({});
+
   const [basePduCapacity, setBasePduCapacity] = useState(7360);
   const [safetyMargin, setSafetyMargin] = useState(80);
   const [powerFactor, setPowerFactor] = useState(0.95);
@@ -57,9 +70,21 @@ const Dashboard: React.FC = () => {
   const [deviceTypes, setDeviceTypes] = useState<string[]>([]);
   const [editingType, setEditingType] = useState<string>('');
   const [editValues, setEditValues] = useState({ uHeight: 1, typical: 0, max: 0 });
-  
+  const [editDims, setEditDims] = useState<PhysicalDimensions>({ ...DEFAULT_DEVICE_DIM });
+
   // UI State
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [theme, toggleTheme] = useTheme();
+  const [activeTab, setActiveTab] = useState<TabId>(() => {
+    try {
+      const t = localStorage.getItem(TAB_STORAGE_KEY);
+      if (t === 'config' || t === 'wiring' || t === 'reports') return t;
+    } catch { /* ignore */ }
+    return 'wiring';
+  });
+  useEffect(() => {
+    try { localStorage.setItem(TAB_STORAGE_KEY, activeTab); } catch { /* ignore */ }
+  }, [activeTab]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const configInputRef = useRef<HTMLInputElement>(null);
@@ -589,6 +614,12 @@ const updateDeviceTypes = (devices: Device[]) => {
     pduPhysicalHeight?: number;
     pduPhysicalWidth?: number;
     pduCordLength?: number;
+    rackPreset?: string;
+    rackDepth?: number;
+    pduVertSpaceU?: number;
+    pduInletType?: 'C13' | 'C14' | 'C19' | 'C20';
+    placementStrategy?: PduPlacementStrategy;
+    deviceDims?: Record<string, PhysicalDimensions>;
     basePduCapacity?: number;
     safetyMargin?: number;
     powerFactor?: number;
@@ -609,6 +640,26 @@ const updateDeviceTypes = (devices: Device[]) => {
     if (config.pduPhysicalHeight !== undefined && (typeof config.pduPhysicalHeight !== 'number' || config.pduPhysicalHeight < 0 || config.pduPhysicalHeight > 500)) return false;
     if (config.pduPhysicalWidth !== undefined && (typeof config.pduPhysicalWidth !== 'number' || config.pduPhysicalWidth < 0 || config.pduPhysicalWidth > 100)) return false;
     if (config.pduCordLength !== undefined && (typeof config.pduCordLength !== 'number' || config.pduCordLength < 0 || config.pduCordLength > 100)) return false;
+
+    // Validate rack-mount PDU placement fields
+    if (config.rackPreset !== undefined && (typeof config.rackPreset !== 'string' || !(config.rackPreset in RACK_SIZES))) return false;
+    if (config.rackDepth !== undefined && (typeof config.rackDepth !== 'number' || config.rackDepth < 10 || config.rackDepth > 200)) return false;
+    if (config.pduVertSpaceU !== undefined && (typeof config.pduVertSpaceU !== 'number' || config.pduVertSpaceU < 0 || config.pduVertSpaceU > 6)) return false;
+    const validInlets = ['C13', 'C14', 'C19', 'C20'];
+    if (config.pduInletType !== undefined && !validInlets.includes(config.pduInletType)) return false;
+    const validStrategies = ['bottom', 'top', 'center'];
+    if (config.placementStrategy !== undefined && !validStrategies.includes(config.placementStrategy)) return false;
+    if (config.deviceDims !== undefined) {
+      if (typeof config.deviceDims !== 'object' || config.deviceDims === null || Array.isArray(config.deviceDims)) return false;
+      for (const [name, dim] of Object.entries(config.deviceDims)) {
+        if (typeof name !== 'string') return false;
+        if (typeof dim !== 'object' || dim === null) return false;
+        for (const key of ['width', 'height', 'depth'] as const) {
+          const v = (dim as any)[key];
+          if (typeof v !== 'number' || v <= 0 || v > 300) return false;
+        }
+      }
+    }
     if (config.basePduCapacity !== undefined && (typeof config.basePduCapacity !== 'number' || config.basePduCapacity < 0 || config.basePduCapacity > 50000)) return false;
     if (config.safetyMargin !== undefined && (typeof config.safetyMargin !== 'number' || config.safetyMargin < 0 || config.safetyMargin > 100)) return false;
     if (config.powerFactor !== undefined && (typeof config.powerFactor !== 'number' || config.powerFactor < 0 || config.powerFactor > 1)) return false;
@@ -666,6 +717,12 @@ const updateDeviceTypes = (devices: Device[]) => {
                     if (config.pduPhysicalHeight) setPduPhysicalHeight(config.pduPhysicalHeight);
                     if (config.pduPhysicalWidth) setPduPhysicalWidth(config.pduPhysicalWidth);
                     if (config.pduCordLength) setPduCordLength(config.pduCordLength);
+                    if (config.rackPreset) setRackPreset(config.rackPreset);
+                    if (config.rackDepth) setRackDepth(config.rackDepth);
+                    if (config.pduVertSpaceU !== undefined) setPduVertSpaceU(config.pduVertSpaceU);
+                    if (config.pduInletType) setPduInletType(config.pduInletType);
+                    if (config.placementStrategy) setPlacementStrategy(config.placementStrategy);
+                    if (config.deviceDims) setDeviceDims(config.deviceDims);
                     if (config.basePduCapacity) setBasePduCapacity(config.basePduCapacity);
                     if (config.safetyMargin) setSafetyMargin(config.safetyMargin);
                     if (config.powerFactor) setPowerFactor(config.powerFactor);
@@ -739,6 +796,12 @@ const updateDeviceTypes = (devices: Device[]) => {
         pduPhysicalHeight,
         pduPhysicalWidth,
         pduCordLength,
+        rackPreset,
+        rackDepth,
+        pduVertSpaceU,
+        pduInletType,
+        placementStrategy,
+        deviceDims,
         basePduCapacity,
         safetyMargin,
         powerFactor,
@@ -968,6 +1031,7 @@ const updateDeviceTypes = (devices: Device[]) => {
               typical: sample.typicalPower,
               max: sample.powerRatingPerDevice
           });
+          setEditDims(deviceDims[type] || { ...DEFAULT_DEVICE_DIM, height: sample.uHeight * 4.45 });
           setEditGroupModalOpen(true);
       }
   };
@@ -986,6 +1050,7 @@ const updateDeviceTypes = (devices: Device[]) => {
               return d;
           });
       });
+      setDeviceDims(prev => ({ ...prev, [editingType]: { ...editDims } }));
       setEditGroupModalOpen(false);
   };
 
@@ -1019,27 +1084,100 @@ const updateDeviceTypes = (devices: Device[]) => {
     return loads;
   }, [activeDevices, pdus]);
 
+  // --- Automatic rack-mount PDU placement -----------------------------------
+  const placement = useMemo(() => calculatePduPlacement({
+    rackSizeU: rackSize,
+    devices: activeDevices,
+    pdus,
+    deviceDims,
+    defaultDeviceDim: DEFAULT_DEVICE_DIM,
+    pduVertSpaceU,
+    pduInletType,
+    strategy: placementStrategy,
+    pduPhysicalHeightCm: pduPhysicalHeight / 10, // state stored in cm (legacy values may be mm-ish; treat as cm)
+    pduCordLengthM: pduCordLength,
+  }), [rackSize, activeDevices, pdus, deviceDims, pduVertSpaceU, pduInletType, placementStrategy, pduPhysicalHeight, pduCordLength]);
+
+  const autoRequiredU = pduRequiredU(pduPhysicalHeight / 10, pduInletType);
+
+  const handleApplyRackPreset = (preset: string) => {
+    setRackPreset(preset);
+    const spec = RACK_SIZES[preset];
+    if (spec) {
+      setRackSize(spec.internalU);
+      setTempRackSize(spec.internalU);
+      setRackDepth(spec.external.depth);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8">
+    <div className="min-h-screen themed-app p-4 md:p-8">
       {/* Header */}
-      <header className="max-w-[1920px] mx-auto mb-6 flex flex-col md:flex-row justify-between items-center gap-4 no-print">
+      <header className="max-w-[1920px] mx-auto mb-6 flex flex-col lg:flex-row justify-between items-center gap-4 no-print">
         <div>
-           <h1 className="text-3xl font-bold text-white tracking-tight">Rack Power Architect</h1>
-           <p className="text-slate-400 mt-1">Interactive Layout & Power Planning</p>
+           <h1 className="text-3xl font-bold themed-heading tracking-tight">Rack Power Architect</h1>
+           <p className="themed-muted mt-1">Interactive Layout & Power Planning</p>
         </div>
-        <div className="flex gap-2 relative">
+
+        {/* Tab Navigation */}
+        <nav
+          role="tablist"
+          aria-label="Main sections"
+          className="flex items-center gap-1 themed-card border rounded-lg p-1 shadow-lg"
+        >
+          {([
+            { id: 'config', label: 'Config', Icon: Settings },
+            { id: 'wiring', label: 'Wiring View', Icon: Boxes },
+            { id: 'reports', label: 'Reports', Icon: ClipboardList },
+          ] as { id: TabId; label: string; Icon: typeof Settings }[]).map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              role="tab"
+              id={`tab-${id}`}
+              aria-selected={activeTab === id}
+              aria-controls={`tabpanel-${id}`}
+              tabIndex={activeTab === id ? 0 : -1}
+              onClick={() => setActiveTab(id)}
+              onKeyDown={(e) => {
+                const order: TabId[] = ['config', 'wiring', 'reports'];
+                if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                  e.preventDefault();
+                  const cur = order.indexOf(activeTab);
+                  const next = e.key === 'ArrowRight'
+                    ? order[(cur + 1) % order.length]
+                    : order[(cur + order.length - 1) % order.length];
+                  setActiveTab(next);
+                }
+              }}
+              className={`px-4 py-2 rounded-md text-sm font-semibold flex items-center gap-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${activeTab === id ? 'themed-tab-active border themed-divider' : 'themed-tab-inactive hover:opacity-80 bg-transparent border border-transparent'}`}
+            >
+              <Icon size={16} /> {label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="flex gap-2 relative flex-wrap justify-center">
+             <button
+                onClick={toggleTheme}
+                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                className="px-3 py-2 themed-card border rounded hover:opacity-80 themed-muted flex items-center gap-2"
+             >
+                 {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+             </button>
+
              <button onClick={handleAutoConnect} className="px-3 py-2 bg-orange-700 rounded border border-orange-600 hover:bg-orange-600 text-white flex items-center gap-2" title="Recalculate wiring based on current positions">
                  <RefreshCw size={16} /> Recalculate Wiring
              </button>
 
-             <button onClick={handleReset} className="px-3 py-2 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700 flex items-center gap-2">
+             <button onClick={handleReset} className="px-3 py-2 themed-card border rounded hover:opacity-80 flex items-center gap-2 themed-muted">
                  <RotateCcw size={16} /> Reset
              </button>
 
-             <button onClick={handleDownloadTemplate} className="px-3 py-2 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700 flex items-center gap-2 text-slate-300" title="Download CSV Template">
+             <button onClick={handleDownloadTemplate} className="px-3 py-2 themed-card border rounded hover:opacity-80 flex items-center gap-2 themed-muted" title="Download CSV Template">
                  <FileText size={16} /> Template
              </button>
-             
+
              <label className="px-3 py-2 bg-blue-600 rounded cursor-pointer hover:bg-blue-500 text-white flex items-center gap-2" title="Import Rack Data from CSV">
                  <Upload size={16} /> Import CSV
                  <input ref={fileInputRef} type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
@@ -1049,29 +1187,31 @@ const updateDeviceTypes = (devices: Device[]) => {
                  <FileJson size={16} /> Load Config
                  <input ref={configInputRef} type="file" accept=".json" onChange={handleFileUpload} className="hidden" />
              </label>
-             
+
              <div className="relative">
-                 <button 
-                    onClick={() => setShowExportMenu(!showExportMenu)} 
+                 <button
+                    onClick={() => setShowExportMenu(!showExportMenu)}
+                    aria-haspopup="menu"
+                    aria-expanded={showExportMenu}
                     className="px-3 py-2 bg-emerald-600 rounded hover:bg-emerald-500 text-white flex items-center gap-2"
                  >
                      <Download size={16} /> Export
                  </button>
                  {showExportMenu && (
-                     <div className="absolute right-0 mt-2 w-48 bg-white text-slate-900 rounded-lg shadow-xl z-50 overflow-hidden border border-slate-200">
-                         <button onClick={handleExportConfig} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
+                     <div role="menu" className="absolute right-0 mt-2 w-48 bg-white text-slate-900 rounded-lg shadow-xl z-50 overflow-hidden border border-slate-200">
+                         <button role="menuitem" onClick={handleExportConfig} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
                              <FileJson size={16} className="text-orange-500" /> Save Config (JSON)
                          </button>
-                         <button onClick={exportImage} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
+                         <button role="menuitem" onClick={exportImage} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
                              <FileImage size={16} className="text-emerald-600" /> Save as Image (PNG)
                          </button>
-                         <button onClick={exportPDF} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
+                         <button role="menuitem" onClick={exportPDF} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-b border-slate-100">
                              <FileText size={16} className="text-red-600" /> Save as PDF
                          </button>
-                         <button onClick={exportHTML} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2">
+                         <button role="menuitem" onClick={exportHTML} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2">
                              <FileCode size={16} className="text-blue-600" /> Save as Report (HTML)
                          </button>
-                         <button onClick={handlePrint} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-t border-slate-100 bg-slate-50 text-slate-500">
+                         <button role="menuitem" onClick={handlePrint} className="w-full text-left px-4 py-3 hover:bg-slate-100 flex items-center gap-2 border-t border-slate-100 bg-slate-50 text-slate-500">
                              <Printer size={16} /> Print View
                          </button>
                      </div>
@@ -1082,43 +1222,75 @@ const updateDeviceTypes = (devices: Device[]) => {
              </div>
         </div>
       </header>
-      
+
       {/* Main Layout */}
       <main className="max-w-[1920px] mx-auto grid grid-cols-1 xl:grid-cols-5 gap-8">
-        
-        <aside className="xl:col-span-1 space-y-6 no-print h-fit sticky top-4">
+
+        {/* ============ CONFIG TAB ============ */}
+        <aside
+          role="tabpanel"
+          id="tabpanel-config"
+          aria-labelledby="tab-config"
+          className={`${activeTab === 'config' ? 'block' : 'hidden'} xl:block xl:col-span-1 space-y-6 h-fit xl:sticky xl:top-4 no-print`}
+        >
             {/* Global Config */}
-            <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-lg">
-                <h3 className="font-bold text-white mb-4 flex items-center gap-2"><Settings size={18} /> Global Config</h3>
+            <div className="themed-card border p-5 rounded-xl shadow-lg">
+                <h3 className="font-bold themed-heading mb-4 flex items-center gap-2"><Settings size={18} /> Global Config</h3>
                 <div className="space-y-4">
-                    
+
                     {/* Rack Size */}
-                    <div className="border-b border-slate-700 pb-3">
-                        <label className="text-xs text-slate-400 uppercase font-bold">Rack Size (U)</label>
+                    <div className="border-b themed-divider pb-3">
+                        <label className="text-xs themed-muted uppercase font-bold">Rack Preset</label>
+                        <select
+                            aria-label="Rack size preset"
+                            value={rackPreset}
+                            onChange={e => handleApplyRackPreset(e.target.value)}
+                            className="w-full themed-input border rounded p-2 mt-1 text-sm"
+                        >
+                            {Object.entries(RACK_SIZES).map(([k, v]) => (
+                                <option key={k} value={k}>{v.label} · {v.external.width}×{v.external.height}×{v.external.depth} cm</option>
+                            ))}
+                        </select>
+                        <label className="text-xs themed-muted uppercase font-bold block mt-2">Rack Size (U)</label>
                         <div className="flex gap-2 mt-1 mb-2">
-                            <input 
-                                type="number" min="4" max="52" 
+                            <input
+                                type="number" min="4" max="52" aria-label="Rack size in U"
                                 value={tempRackSize} onChange={e => setTempRackSize(e.target.value)}
-                                className="w-full bg-slate-800 border border-slate-700 rounded p-2"
+                                className="w-full themed-input border rounded p-2"
                             />
                             <button onClick={handleApplyRackSize} className="bg-blue-600 hover:bg-blue-500 text-white px-2 rounded text-xs font-bold">SET</button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <span className="text-[10px] themed-dim block">External Depth (cm)</span>
+                                <input
+                                    type="number" min="10" max="200" aria-label="Rack external depth in cm"
+                                    value={rackDepth} onChange={e => setRackDepth(Math.max(10, Math.min(200, Number(e.target.value) || 10)))}
+                                    className="w-full themed-input border rounded p-2"
+                                />
+                            </div>
+                            <div className="themed-input border rounded p-2 text-[10px] themed-dim flex flex-col justify-center">
+                                <span>Usable height: <b className="themed-muted">{(rackSize * 4.45).toFixed(1)} cm</b></span>
+                                <span>Free after PDUs: <b className="themed-muted">{placement.freeU}U</b></span>
+                            </div>
                         </div>
                     </div>
 
                     {/* Primary Sockets */}
-                    <div className="border-b border-slate-700 pb-3">
-                        <label className="text-xs text-slate-400 uppercase font-bold">Group 1: Sockets</label>
+                    <div className="border-b themed-divider pb-3">
+                        <label className="text-xs themed-muted uppercase font-bold">Group 1: Sockets</label>
                         <div className="flex gap-2 mt-1 mb-2">
-                            <input 
-                                type="number" min="1" max="100" 
+                            <input
+                                type="number" min="1" max="100" aria-label="Primary sockets per PDU"
                                 value={tempSockets} onChange={e => setTempSockets(e.target.value)}
-                                className="w-full bg-slate-800 border border-slate-700 rounded p-2"
+                                className="w-full themed-input border rounded p-2"
                             />
                             <button onClick={handleApplySockets} className="bg-blue-600 hover:bg-blue-500 text-white px-2 rounded text-xs font-bold">SET</button>
                         </div>
-                        <select 
+                        <select
+                            aria-label="Primary socket type"
                             value={socketType} onChange={e => setSocketType(e.target.value as SocketType)}
-                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm"
+                            className="w-full themed-input border rounded p-2 text-sm"
                         >
                             <option value="UK">UK (Type G)</option>
                             <option value="C13">C13 (IEC)</option>
@@ -1127,19 +1299,20 @@ const updateDeviceTypes = (devices: Device[]) => {
                     </div>
 
                     {/* Secondary Sockets */}
-                    <div className="border-b border-slate-700 pb-3">
-                        <label className="text-xs text-slate-400 uppercase font-bold">Group 2: Sockets</label>
+                    <div className="border-b themed-divider pb-3">
+                        <label className="text-xs themed-muted uppercase font-bold">Group 2: Sockets</label>
                         <div className="flex gap-2 mt-1 mb-2">
-                            <input 
-                                type="number" min="0" max="16" 
+                            <input
+                                type="number" min="0" max="16" aria-label="Secondary sockets per PDU"
                                 value={tempSecondarySockets} onChange={e => setTempSecondarySockets(e.target.value)}
-                                className="w-full bg-slate-800 border border-slate-700 rounded p-2"
+                                className="w-full themed-input border rounded p-2"
                             />
                             <button onClick={handleApplySecondarySockets} className="bg-blue-600 hover:bg-blue-500 text-white px-2 rounded text-xs font-bold">SET</button>
                         </div>
-                        <select 
+                        <select
+                            aria-label="Secondary socket type"
                             value={secondarySocketType} onChange={e => setSecondarySocketType(e.target.value as SocketType)}
-                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm"
+                            className="w-full themed-input border rounded p-2 text-sm"
                         >
                             <option value="UK">UK (Type G)</option>
                             <option value="C13">C13 (IEC)</option>
@@ -1148,43 +1321,45 @@ const updateDeviceTypes = (devices: Device[]) => {
                     </div>
 
                     <div>
-                        <label className="text-xs text-slate-400 uppercase font-bold">Total PDU Capacity</label>
-                        <select 
+                        <label className="text-xs themed-muted uppercase font-bold">Total PDU Capacity</label>
+                        <select
+                            aria-label="Total PDU capacity"
                             value={basePduCapacity} onChange={e => setBasePduCapacity(Number(e.target.value))}
-                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 mt-1"
+                            className="w-full themed-input border rounded p-2 mt-1"
                         >
                             {PDU_VARIANTS.map(v => <option key={v.power} value={v.power}>{v.name}</option>)}
                         </select>
                     </div>
 
                     {/* Inferred Specs Display */}
-                    <div className="border-b border-slate-700 pb-3 pt-2">
-                        <div className="text-[10px] uppercase font-bold text-slate-500 mb-1 flex items-center gap-1">
+                    <div className="border-b themed-divider pb-3 pt-2">
+                        <div className="text-[10px] uppercase font-bold themed-dim mb-1 flex items-center gap-1">
                             <Zap size={10} className="text-yellow-500" />
                             PDU Electrical Specs
                         </div>
-                        <div className="grid grid-cols-2 gap-2 text-xs text-slate-300">
-                             <div className="bg-slate-800 p-1.5 rounded border border-slate-700">
-                                 <div className="text-[9px] text-slate-500">Output Phase</div>
+                        <div className="grid grid-cols-2 gap-2 text-xs themed-muted">
+                             <div className="themed-input p-1.5 rounded border themed-divider">
+                                 <div className="text-[9px] themed-dim">Output Phase</div>
                                  <div className="font-mono">{pduSpecs.voltage}V</div>
                              </div>
-                             <div className="bg-slate-800 p-1.5 rounded border border-slate-700">
-                                 <div className="text-[9px] text-slate-500">Breakers</div>
+                             <div className="themed-input p-1.5 rounded border themed-divider">
+                                 <div className="text-[9px] themed-dim">Breakers</div>
                                  <div className="font-mono">{pduSpecs.circuits}x {pduSpecs.amps}A</div>
                              </div>
                         </div>
                     </div>
 
                     {/* PDU Count Control */}
-                    <div className="border-b border-slate-700 pb-3">
-                        <label className="text-xs text-slate-400 uppercase font-bold flex justify-between items-center">
+                    <div className="border-b themed-divider pb-3">
+                        <label className="text-xs themed-muted uppercase font-bold flex justify-between items-center">
                             <span>PDU Pairs (A+B)</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${manualPduPairs !== null ? 'bg-orange-900/50 text-orange-400 border border-orange-800' : 'bg-slate-800 text-slate-500 border border-slate-700'}`}>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${manualPduPairs !== null ? 'bg-orange-900/50 text-orange-400 border border-orange-800' : 'themed-input themed-dim border themed-divider'}`}>
                                 {manualPduPairs !== null ? 'MANUAL' : 'AUTO'}
                             </span>
                         </label>
                         <div className="flex items-center gap-2 mt-2">
-                             <button 
+                             <button
+                                aria-label="Decrease PDU pairs"
                                 onClick={() => {
                                     if (activePduPairs > calculatedPduPairs) {
                                         const newValue = activePduPairs - 1;
@@ -1192,87 +1367,159 @@ const updateDeviceTypes = (devices: Device[]) => {
                                     }
                                 }}
                                 disabled={activePduPairs <= calculatedPduPairs}
-                                className={`p-2 rounded border flex-1 flex justify-center ${activePduPairs <= calculatedPduPairs ? 'bg-slate-800 text-slate-600 border-slate-700 cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-600'}`}
+                                className={`p-2 rounded border flex-1 flex justify-center ${activePduPairs <= calculatedPduPairs ? 'themed-input themed-dim border themed-divider cursor-not-allowed' : 'bg-slate-700 hover:bg-slate-600 text-white border-slate-600'}`}
                              >
                                 <Minus size={16} />
                              </button>
-                             
-                             <div className="flex-1 text-center font-mono font-bold text-xl bg-slate-800 border border-slate-700 rounded py-1.5">
+
+                             <div className="flex-1 text-center font-mono font-bold text-xl themed-input border themed-divider rounded py-1.5" aria-live="polite">
                                 {activePduPairs}
                              </div>
 
-                             <button 
+                             <button
+                                aria-label="Increase PDU pairs"
                                 onClick={() => setManualPduPairs(activePduPairs + 1)}
                                 className="p-2 rounded border bg-slate-700 hover:bg-slate-600 text-white border-slate-600 flex-1 flex justify-center"
                              >
                                 <Plus size={16} />
                              </button>
                         </div>
-                        <div className="text-[10px] text-slate-500 mt-1 text-center">
+                        <div className="text-[10px] themed-dim mt-1 text-center">
                             Min Required: {calculatedPduPairs} pair(s) based on capacity & sockets.
                         </div>
                     </div>
-                    
+
                     {/* PDU Physical Specs */}
-                    <div>
-                        <label className="text-xs text-slate-400 uppercase font-bold">PDU Dimensions</label>
+                    <div className="border-b themed-divider pb-3">
+                        <label className="text-xs themed-muted uppercase font-bold">PDU Dimensions</label>
                         <div className="grid grid-cols-2 gap-2 mt-1">
                             <div>
-                                <span className="text-[10px] text-slate-500 block">Height (cm)</span>
-                                <input 
-                                    type="number" min="1" 
+                                <span className="text-[10px] themed-dim block">Height (cm)</span>
+                                <input
+                                    type="number" min="1" aria-label="PDU height in cm"
                                     value={pduPhysicalHeight} onChange={e => setPduPhysicalHeight(Number(e.target.value))}
-                                    className="w-full bg-slate-800 border border-slate-700 rounded p-2"
+                                    className="w-full themed-input border rounded p-2"
                                 />
                             </div>
                             <div>
-                                <span className="text-[10px] text-slate-500 block">Width (cm)</span>
-                                <input 
-                                    type="number" min="1" 
+                                <span className="text-[10px] themed-dim block">Width (cm)</span>
+                                <input
+                                    type="number" min="1" aria-label="PDU width in cm"
                                     value={pduPhysicalWidth} onChange={e => setPduPhysicalWidth(Number(e.target.value))}
-                                    className="w-full bg-slate-800 border border-slate-700 rounded p-2"
+                                    className="w-full themed-input border rounded p-2"
                                 />
                             </div>
                         </div>
-                         <div className="mt-2 border-t border-slate-700 pt-2">
-                            <label className="text-xs text-slate-400 uppercase font-bold">PDU Layout</label>
-                            <select 
+                         <div className="mt-2 border-t themed-divider pt-2">
+                            <label className="text-xs themed-muted uppercase font-bold">PDU Layout</label>
+                            <select
+                                aria-label="PDU socket layout"
                                 value={pduCols} onChange={e => setPduCols(Number(e.target.value))}
-                                className="w-full bg-slate-800 border border-slate-700 rounded p-2 mt-1 text-sm"
+                                className="w-full themed-input border rounded p-2 mt-1 text-sm"
                             >
                                 <option value={1}>Single Column (Standard)</option>
                                 <option value={2}>Double Column (Wide)</option>
                             </select>
                         </div>
                     </div>
+
+                    {/* Rack-Mount PDU Placement */}
+                    <div className="border-b themed-divider pb-3">
+                        <label className="text-xs themed-muted uppercase font-bold flex items-center justify-between">
+                            <span>Rack-Mount PDU Placement</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded themed-input themed-dim border themed-divider">
+                                {placementStrategy === 'bottom' ? 'BACK-BOTTOM' : placementStrategy === 'top' ? 'BACK-TOP' : 'BACK-CENTER'}
+                            </span>
+                        </label>
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                                <span className="text-[10px] themed-dim block">Vertical Space (U)</span>
+                                <select
+                                    aria-label="PDU vertical space in U"
+                                    value={pduVertSpaceU}
+                                    onChange={e => setPduVertSpaceU(Number(e.target.value))}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                >
+                                    <option value={0}>AUTO ({autoRequiredU}U)</option>
+                                    {[1,2,3,4,5,6].map(u => <option key={u} value={u}>{u}U</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <span className="text-[10px] themed-dim block">Inlet Type</span>
+                                <select
+                                    aria-label="PDU inlet type"
+                                    value={pduInletType}
+                                    onChange={e => setPduInletType(e.target.value as keyof typeof CORD_BEND_CM)}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                >
+                                    <option value="C13">C13 cord ({CORD_BEND_CM.C13} cm bend)</option>
+                                    <option value="C14">Fixed C14 inlet ({CORD_BEND_CM.C14} cm bend)</option>
+                                    <option value="C19">C19 cord ({CORD_BEND_CM.C19} cm bend)</option>
+                                    <option value="C20">Fixed C20 inlet ({CORD_BEND_CM.C20} cm bend)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="mt-2">
+                            <span className="text-[10px] themed-dim block">Placement Strategy (rear mounting rails)</span>
+                            <select
+                                aria-label="PDU placement strategy"
+                                value={placementStrategy}
+                                onChange={e => setPlacementStrategy(e.target.value as PduPlacementStrategy)}
+                                className="w-full themed-input border rounded p-2 text-sm"
+                            >
+                                <option value="bottom">Bottom band (recommended)</option>
+                                <option value="center">Center of rack</option>
+                                <option value="top">Top of rack</option>
+                            </select>
+                        </div>
+                        <div className="mt-2 text-[10px] themed-dim space-y-1" aria-live="polite">
+                            {placement.warnings.length === 0 && <div>No placement issues detected.</div>}
+                            {placement.warnings.map((w, i) => (
+                                <div key={i} className={`flex gap-1 items-start ${w.level === 'error' ? 'text-red-400' : w.level === 'warning' ? 'text-amber-400' : 'themed-muted'}`}>
+                                    <AlertTriangle size={11} className="shrink-0 mt-0.5" />
+                                    <span>{w.message}</span>
+                                </div>
+                            ))}
+                        </div>
+                        {placement.placements.length > 0 && (
+                            <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] font-mono themed-muted">
+                                {placement.placements.map(p => (
+                                    <div key={p.pduId} className="themed-input border themed-divider rounded px-1.5 py-1 flex justify-between">
+                                        <span>{p.pduId}</span>
+                                        <span title={`${(p.startMm/10).toFixed(1)}–${(p.endMm/10).toFixed(1)} cm from floor`}>U{p.uPosition - p.uSpan + 1}–{p.uPosition}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                     <div>
-                        <label className="text-xs text-slate-400 uppercase font-bold">Cord Length (m)</label>
-                        <input 
-                            type="number" min="0.5" step="0.5" 
+                        <label className="text-xs themed-muted uppercase font-bold">Cord Length (m)</label>
+                        <input
+                            type="number" min="0.5" step="0.5" aria-label="PDU cord length in meters"
                             value={pduCordLength} onChange={e => setPduCordLength(Number(e.target.value))}
-                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 mt-1"
+                            className="w-full themed-input border rounded p-2 mt-1"
                         />
                     </div>
 
 
                     <div>
-                         <label className="text-xs text-slate-400 uppercase font-bold flex justify-between">
+                         <label className="text-xs themed-muted uppercase font-bold flex justify-between">
                             <span>Power Factor</span> <span>{powerFactor}</span>
                          </label>
-                         <input type="range" min="0.5" max="1" step="0.01" value={powerFactor} onChange={e => setPowerFactor(Number(e.target.value))} className="w-full accent-emerald-500"/>
+                         <input type="range" aria-label="Power factor" min="0.5" max="1" step="0.01" value={powerFactor} onChange={e => setPowerFactor(Number(e.target.value))} className="w-full accent-emerald-500"/>
                     </div>
                 </div>
             </div>
 
             {/* Device Group Editor */}
-            <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-lg">
-                <h3 className="font-bold text-white mb-4 flex items-center gap-2"><Edit3 size={18} /> Device Library</h3>
+            <div className="themed-card border p-5 rounded-xl shadow-lg">
+                <h3 className="font-bold themed-heading mb-4 flex items-center gap-2"><Edit3 size={18} /> Device Library</h3>
                 <div className="flex flex-col gap-2 max-h-60 overflow-y-auto pr-2">
                     {deviceTypes.map(type => (
-                        <button 
+                        <button
                             key={type}
                             onClick={() => openGroupEditor(type)}
-                            className="text-left text-sm p-2 bg-slate-800 hover:bg-slate-700 rounded border border-slate-700 truncate"
+                            className="text-left text-sm p-2 themed-input hover:opacity-80 rounded border themed-divider truncate"
                         >
                             {type}
                         </button>
@@ -1281,29 +1528,34 @@ const updateDeviceTypes = (devices: Device[]) => {
             </div>
 
             {/* Stats Summary */}
-             <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-lg">
-                 <h3 className="font-bold text-white mb-4 flex items-center gap-2"><BatteryCharging size={18} /> Summary</h3>
+             <div className="themed-card border p-5 rounded-xl shadow-lg">
+                 <h3 className="font-bold themed-heading mb-4 flex items-center gap-2"><BatteryCharging size={18} /> Summary</h3>
                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-slate-400">Total Max Load</span>
-                    <span className="text-xl font-mono font-bold text-white">{Math.round(maxLoad)}W</span>
+                    <span className="text-sm themed-muted">Total Max Load</span>
+                    <span className="text-xl font-mono font-bold themed-heading">{Math.round(maxLoad)}W</span>
                  </div>
                  <div className="flex justify-between items-center mt-1">
-                    <span className="text-sm text-slate-400">Total Typical</span>
+                    <span className="text-sm themed-muted">Total Typical</span>
                     <span className="text-md font-mono text-emerald-400">{Math.round(totalLoad)}W</span>
                  </div>
-                 <div className="mt-4 pt-4 border-t border-slate-700 text-xs text-slate-500">
+                 <div className="mt-4 pt-4 border-t themed-divider text-xs themed-dim">
                     Required PDUs: {calculatedPduPairs} pair(s) based on capacity & sockets.
                     {manualPduPairs !== null && <div className="text-orange-400 mt-1">Overridden to {manualPduPairs} pairs.</div>}
                  </div>
              </div>
         </aside>
 
-        {/* Rack Visualization Area */}
-        <section className="xl:col-span-4 flex justify-center pb-20 overflow-x-auto">
-             <div ref={visualizerRef} className="p-4 bg-slate-950 inline-block rounded-xl">
+        {/* ============ WIRING TAB ============ */}
+        <section
+          role="tabpanel"
+          id="tabpanel-wiring"
+          aria-labelledby="tab-wiring"
+          className={`${activeTab === 'wiring' ? 'block' : 'hidden'} xl:col-span-4 xl:!flex justify-center pb-20 overflow-x-auto`}
+        >
+             <div ref={visualizerRef} className="p-4 themed-diagram inline-block rounded-xl">
                  {activeDevices.length > 0 ? (
-                     <RackVisualizer 
-                        devices={activeDevices} 
+                     <RackVisualizer
+                        devices={activeDevices}
                         onMoveDevice={handleMoveDevice}
                         onUpdateConnection={handleConnectionUpdate}
                         pdus={pdus}
@@ -1319,50 +1571,190 @@ const updateDeviceTypes = (devices: Device[]) => {
                         circuitRating={pduSpecs.amps}
                         isThreePhase={pduSpecs.isThreePhase}
                         pduCols={pduCols}
+                        placement={placement}
                      />
                  ) : (
-                     <div className="text-slate-500 mt-20 text-center w-[600px]">No devices loaded. Upload a CSV to begin.</div>
+                     <div className="themed-dim mt-20 text-center w-[600px]">No devices loaded. Upload a CSV to begin.</div>
                  )}
              </div>
+        </section>
+
+        {/* ============ REPORTS TAB ============ */}
+        <section
+          role="tabpanel"
+          id="tabpanel-reports"
+          aria-labelledby="tab-reports"
+          className={`${activeTab === 'reports' ? 'block' : 'hidden'} xl:col-span-4`}
+        >
+            <div className="themed-card border rounded-xl p-6 shadow-lg max-w-4xl">
+                <h2 className="text-2xl font-bold themed-heading mb-1">Bill of Materials</h2>
+                <p className="text-sm themed-muted mb-6">
+                    {activeDevices[0]?.room || 'Rack'} · {activeDevices.length} devices · Max {Math.round(maxLoad)}W / Typical {Math.round(totalLoad)}W
+                </p>
+
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left border-collapse">
+                        <caption className="sr-only">Bill of materials for all rack devices</caption>
+                        <thead>
+                            <tr className="border-b themed-divider themed-muted uppercase text-xs">
+                                <th scope="col" className="py-2 pr-4">Device</th>
+                                <th scope="col" className="py-2 pr-4">Room</th>
+                                <th scope="col" className="py-2 pr-4 text-right">U Height</th>
+                                <th scope="col" className="py-2 pr-4 text-right">PSUs</th>
+                                <th scope="col" className="py-2 pr-4">Conn.</th>
+                                <th scope="col" className="py-2 pr-4 text-right">Typical (W)</th>
+                                <th scope="col" className="py-2 pr-4 text-right">Max (W)</th>
+                                <th scope="col" className="py-2">Feed A</th>
+                                <th scope="col" className="py-2">Feed B</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {activeDevices.map(d => {
+                                const conns = Object.values(d.psuConnections).filter(Boolean) as PSUConnection[];
+                                const feedA = conns.filter(c => c.pduId.startsWith('A')).map(c => c.pduId).join(', ') || '—';
+                                const feedB = conns.filter(c => c.pduId.startsWith('B')).map(c => c.pduId).join(', ') || '—';
+                                return (
+                                    <tr key={d.id} className="border-b themed-divider last:border-0">
+                                        <td className="py-2 pr-4 themed-heading font-medium truncate max-w-[220px]" title={d.name}>{d.name}</td>
+                                        <td className="py-2 pr-4 themed-muted">{d.room}</td>
+                                        <td className="py-2 pr-4 text-right font-mono">{d.uHeight}U</td>
+                                        <td className="py-2 pr-4 text-right font-mono">{d.psuCount}</td>
+                                        <td className="py-2 pr-4 themed-muted">{d.connectionType}</td>
+                                        <td className="py-2 pr-4 text-right font-mono text-emerald-400">{Math.round(d.typicalPower)}</td>
+                                        <td className="py-2 pr-4 text-right font-mono">{Math.round(d.powerRatingPerDevice)}</td>
+                                        <td className="py-2 font-mono text-blue-400">{feedA}</td>
+                                        <td className="py-2 font-mono text-red-400">{feedB}</td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                        <tfoot>
+                            <tr className="themed-heading font-bold border-t-2 themed-divider">
+                                <td className="py-2 pr-4" colSpan={5}>Totals</td>
+                                <td className="py-2 pr-4 text-right font-mono text-emerald-400">{Math.round(totalLoad)}</td>
+                                <td className="py-2 pr-4 text-right font-mono">{Math.round(maxLoad)}</td>
+                                <td className="py-2" colSpan={2}></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+
+                <h3 className="text-lg font-bold themed-heading mt-8 mb-3">PDU Load Balance</h3>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left border-collapse">
+                        <caption className="sr-only">PDU load balance across all feeds</caption>
+                        <thead>
+                            <tr className="border-b themed-divider themed-muted uppercase text-xs">
+                                <th scope="col" className="py-2 pr-4">PDU</th>
+                                <th scope="col" className="py-2 pr-4">Side</th>
+                                <th scope="col" className="py-2 pr-4 text-right">Max Load (W)</th>
+                                <th scope="col" className="py-2 pr-4 text-right">Capacity (W)</th>
+                                <th scope="col" className="py-2">Utilization</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {pdus.map(p => {
+                                const load = pduLoads[p.id]?.max || 0;
+                                const pct = Math.min(100, (load / p.powerCapacity) * 100);
+                                const overloaded = load > p.powerCapacity * powerFactor * (safetyMargin / 100);
+                                return (
+                                    <tr key={p.id} className="border-b themed-divider last:border-0">
+                                        <td className="py-2 pr-4 font-mono themed-heading">{p.id}</td>
+                                        <td className={`py-2 pr-4 font-mono ${p.side === 'A' ? 'text-blue-400' : 'text-red-400'}`}>{p.side}</td>
+                                        <td className={`py-2 pr-4 text-right font-mono ${overloaded ? 'text-red-400 font-bold' : 'themed-muted'}`}>{Math.round(load)}</td>
+                                        <td className="py-2 pr-4 text-right font-mono themed-muted">{p.powerCapacity}</td>
+                                        <td className="py-2 w-48">
+                                            <div className="w-full h-2 themed-input rounded-full overflow-hidden border themed-divider" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label={`${p.id} utilization`}>
+                                                <div className={`h-full ${overloaded ? 'bg-red-500' : pct > 80 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${pct}%` }}></div>
+                                            </div>
+                                            <span className="text-[10px] themed-dim font-mono">{pct.toFixed(1)}%</span>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="mt-8 flex flex-wrap gap-3 no-print">
+                    <button onClick={exportPDF} className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded flex items-center gap-2">
+                        <FileText size={16} /> Export PDF Diagram
+                    </button>
+                    <button onClick={exportImage} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded flex items-center gap-2">
+                        <FileImage size={16} /> Export PNG
+                    </button>
+                    <button onClick={exportHTML} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded flex items-center gap-2">
+                        <FileCode size={16} /> Export HTML Report
+                    </button>
+                    <button onClick={handlePrint} className="px-4 py-2 themed-card border rounded hover:opacity-80 themed-muted flex items-center gap-2">
+                        <Printer size={16} /> Print
+                    </button>
+                </div>
+            </div>
         </section>
 
       </main>
 
       {/* Group Edit Modal */}
       {editGroupModalOpen && (
-          <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-              <div className="bg-slate-900 p-6 rounded-xl border border-slate-700 shadow-2xl w-full max-w-md">
-                  <h3 className="text-xl font-bold text-white mb-4">Edit Group: <span className="text-blue-400">{editingType}</span></h3>
-                  
+          <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-label={`Edit device group ${editingType}`}>
+              <div className="themed-modal border p-6 rounded-xl shadow-2xl w-full max-w-md">
+                  <h3 className="text-xl font-bold themed-heading mb-4">Edit Group: <span className="text-blue-400">{editingType}</span></h3>
+
                   <div className="space-y-4">
                       <div>
-                          <label className="block text-sm text-slate-400 mb-1">Rack U Height</label>
-                          <select 
+                          <label className="block text-sm themed-muted mb-1" htmlFor="edit-uheight">Rack U Height</label>
+                          <select
+                            id="edit-uheight"
                             value={editValues.uHeight}
                             onChange={e => setEditValues(prev => ({...prev, uHeight: Number(e.target.value)}))}
-                            className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-white"
+                            className="w-full themed-input border themed-divider rounded p-2 themed-heading"
                           >
                               {[1,2,3,4,5,6,7,8,10,14].map(u => <option key={u} value={u}>{u}U</option>)}
                           </select>
                       </div>
-                      
+
+                      {/* Physical dimensions (cm) — used by the PDU placement calculator */}
+                      <div className="border themed-divider rounded p-3">
+                          <div className="text-xs themed-muted uppercase font-bold mb-2">Physical Dimensions (cm)</div>
+                          <div className="grid grid-cols-3 gap-2">
+                              {(['width', 'height', 'depth'] as const).map((dim) => (
+                                  <div key={dim}>
+                                      <label className="text-[10px] themed-dim block capitalize" htmlFor={`edit-dim-${dim}`}>{dim}</label>
+                                      <input
+                                          id={`edit-dim-${dim}`}
+                                          type="number" min="0.1" step="0.1"
+                                          value={editDims[dim]}
+                                          onChange={e => setEditDims(prev => ({ ...prev, [dim]: Math.max(0.1, Number(e.target.value) || 0.1) }))}
+                                          className="w-full themed-input border themed-divider rounded p-1.5 text-sm themed-heading"
+                                      />
+                                  </div>
+                              ))}
+                          </div>
+                          <p className="text-[10px] themed-dim mt-2">
+                              If the body height exceeds its U rating, the extra space blocks rack-mount PDU slots above the device.
+                          </p>
+                      </div>
+
                       <div>
-                          <label className="block text-sm text-slate-400 mb-1">Typical Power (W)</label>
-                          <input 
-                             type="number" 
+                          <label className="block text-sm themed-muted mb-1" htmlFor="edit-typical">Typical Power (W)</label>
+                          <input
+                             id="edit-typical"
+                             type="number"
                              value={editValues.typical}
                              onChange={e => setEditValues(prev => ({...prev, typical: Number(e.target.value)}))}
-                             className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-white"
+                             className="w-full themed-input border themed-divider rounded p-2 themed-heading"
                           />
                       </div>
 
                       <div>
-                          <label className="block text-sm text-slate-400 mb-1">Max Power Rating (W)</label>
-                          <input 
-                             type="number" 
+                          <label className="block text-sm themed-muted mb-1" htmlFor="edit-max">Max Power Rating (W)</label>
+                          <input
+                             id="edit-max"
+                             type="number"
                              value={editValues.max}
                              onChange={e => setEditValues(prev => ({...prev, max: Number(e.target.value)}))}
-                             className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-white"
+                             className="w-full themed-input border themed-divider rounded p-2 themed-heading"
                           />
                       </div>
                   </div>
@@ -1371,7 +1763,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                       <button onClick={saveGroupEdit} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded flex justify-center items-center gap-2">
                           <Save size={18} /> Save All
                       </button>
-                      <button onClick={() => setEditGroupModalOpen(false)} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2 rounded">
+                      <button onClick={() => setEditGroupModalOpen(false)} className="flex-1 themed-card border hover:opacity-80 themed-muted py-2 rounded">
                           Cancel
                       </button>
                   </div>
