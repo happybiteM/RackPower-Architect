@@ -306,7 +306,7 @@ const RackSideView: React.FC<Props> = ({
       ))}
 
       {/* Hover highlight while dragging */}
-      {hoverU !== null && drag && (
+      {hoverU !== null && dragId && (
         <rect x={xFrontRail + RAIL_W} y={uTopY(hoverU)} width={innerW - RAIL_W * 2} height={U_HEIGHT_PX}
               fill="#fbbf24" opacity={0.25} pointerEvents="none" />
       )}
