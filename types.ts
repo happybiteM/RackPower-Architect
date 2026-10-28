@@ -143,8 +143,12 @@ export const RACK_SIZES: Record<string, { label: string; external: PhysicalDimen
 };
 
 /** Vertical zero-U space required above a rack-mounted PDU for its inlet cord bend. */
-export const CORD_BEND_CM: Record<'C13' | 'C14' | 'C19' | 'C20', number> = {
+/** Required vertical bend/clearance space (cm) above a rack-mounted PDU for
+ *  each inlet/plug type. Includes legacy cord ends (C13/C19) and modern
+ *  PduInletType values so placement math works for every library entry. */
+export const CORD_BEND_CM: Record<'C13' | 'C14' | 'C19' | 'C20' | PduInletType, number> = {
   C13: 5, C14: 5, C19: 6, C20: 6,
+  'IEC-309-16A': 8, 'IEC-309-32A': 10, Hardwired: 4,
 };
 
 export type PduPlacementStrategy = 'bottom' | 'top' | 'center';

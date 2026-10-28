@@ -8,7 +8,7 @@ import {
   VerticalPlacementMap,
   MountSide,
 } from '../types';
-import { DEFAULT_DEVICE_DIM } from '../utils/placement';
+import { DEFAULT_DEVICE_DIM, MM_PER_U } from '../utils/placement';
 
 /**
  * RackSideView — interactive side (elevation) view of the rack.
@@ -155,7 +155,12 @@ const RackSideView: React.FC<Props> = ({
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
       const p = clientToSvg(e.clientX, e.clientY);
       if (!p) return;
-      setDrag({ ...geom, grabX: p.x - geom.x, grabY: p.y - geom.y });
+      // geom carries x/y (current top-left) — remap to the state's x0/y0 fields.
+      setDrag({
+        id: geom.id, kind: geom.kind,
+        grabX: p.x - geom.x, grabY: p.y - geom.y,
+        x0: geom.x, y0: geom.y, w: geom.w, hPx: geom.hPx,
+      });
     };
 
   const handlePointerMove = (e: React.PointerEvent) => {

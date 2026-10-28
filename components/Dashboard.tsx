@@ -132,8 +132,8 @@ const Dashboard: React.FC = () => {
   // Primary/secondary socket counts & types now come from the reference PDU type.
   const baseSocketsPerPDU = refPduType?.socketCount ?? 8;
   const secondarySocketsPerPDU = refPduType?.secondarySocketCount ?? 0;
-  const socketTypeDerived: SocketType = refPduType?.socketType ?? 'C13';
-  const secondarySocketTypeDerived: SocketType = refPduType?.secondarySocketType ?? 'C19';
+  const socketType = refPduType?.socketType ?? 'C13';
+  const secondarySocketType: SocketType = refPduType?.secondarySocketType ?? 'C19';
 
   // Per-type power capacity is the single source of truth; fall back to the
   // legacy PDU_VARIANTS default when no type is defined yet.
@@ -141,12 +141,11 @@ const Dashboard: React.FC = () => {
 
   // Placement inputs derived from the library (both diagrams consume these):
   const pduVertSpaceU = 0;                                   // always auto from per-PDU physical height
-  const pduInletClearanceKey: keyof typeof CORD_BEND_CM =
-    refPduType && (refPduType.inletType === 'C14' || refPduType.inletType === 'C20')
-      ? refPduType.inletType : 'C14';
-  const pduPhysicalHeightCm = refPduType?.physicalHeightCm ?? 18;   // cm — body height/strip length
-  const pduPhysicalWidthCm = refPduType?.physicalWidthCm ?? 5.5;    // cm — faceplate width
-  const pduCols = refPduType?.cols ?? 1;                            // socket columns on face
+  const pduInletType: keyof typeof CORD_BEND_CM = refPduType?.inletType ?? 'C14';
+  const pduPhysicalHeight = refPduType?.physicalHeightCm ?? 18;   // cm — body height/strip length
+  const pduPhysicalWidth = refPduType?.physicalWidthCm ?? 5.5;    // cm — faceplate width
+  /** Socket columns on the face of a horizontal PDU (drives diagram layout). */
+  const pduCols = Math.max(1, Math.min(2, Math.round(pduPhysicalWidth / 24)));
   const horizontalDepthCm =
     pduLibrary.find(t => t.formFactor === 'horizontal' && t.quantity > 0)?.physicalDepthCm
     ?? refPduType?.physicalDepthCm ?? 7.5;
@@ -718,66 +717,33 @@ const updateDeviceTypes = (devices: Device[]) => {
     }
   };
 
-  const handleApplySockets = () => {
-    const val = Number(tempSockets);
-    if (!isNaN(val) && val >= 1 && val <= 100) {
-        setBaseSocketsPerPDU(Math.floor(val));
-    } else {
-        setTempSockets(baseSocketsPerPDU);
-    }
-  };
-
-  const handleApplySecondarySockets = () => {
-    const val = Number(tempSecondarySockets);
-    if (!isNaN(val) && val >= 0 && val <= 16) {
-        setSecondarySocketsPerPDU(Math.floor(val));
-    } else {
-        setTempSecondarySockets(secondarySocketsPerPDU);
-    }
-  };
-
-  // JSON schema validation for config files
+  // JSON schema validation for config files. PDU configuration now lives in
+  // the merged PDU library inside Global Config — import/export round-trips it.
   interface ConfigSchema {
     rackSize?: number;
-    baseSocketsPerPDU?: number;
-    secondarySocketsPerPDU?: number;
-    pduCols?: number;
-    pduPhysicalHeight?: number;
-    pduPhysicalWidth?: number;
     pduCordLength?: number;
     rackPreset?: string;
     rackDepth?: number;
-    pduVertSpaceU?: number;
-    pduInletType?: 'C13' | 'C14' | 'C19' | 'C20';
     placementStrategy?: PduPlacementStrategy;
     deviceDims?: Record<string, PhysicalDimensions>;
-    basePduCapacity?: number;
     safetyMargin?: number;
     powerFactor?: number;
-    socketType?: SocketType;
-    secondarySocketType?: SocketType;
+    /** Merged PDU library — single source of truth for all PDU configuration. */
+    pduLibrary?: PduType[];
     activeDevices?: Device[];
     csvInput?: string;
   }
 
   const validateConfigSchema = (config: any): config is ConfigSchema => {
     if (typeof config !== 'object' || config === null) return false;
-    
+
     // Validate numeric fields with reasonable ranges
     if (config.rackSize !== undefined && (typeof config.rackSize !== 'number' || config.rackSize < 4 || config.rackSize > 52)) return false;
-    if (config.baseSocketsPerPDU !== undefined && (typeof config.baseSocketsPerPDU !== 'number' || config.baseSocketsPerPDU < 1 || config.baseSocketsPerPDU > 100)) return false;
-    if (config.secondarySocketsPerPDU !== undefined && (typeof config.secondarySocketsPerPDU !== 'number' || config.secondarySocketsPerPDU < 0 || config.secondarySocketsPerPDU > 16)) return false;
-    if (config.pduCols !== undefined && (typeof config.pduCols !== 'number' || config.pduCols < 1 || config.pduCols > 16)) return false;
-    if (config.pduPhysicalHeight !== undefined && (typeof config.pduPhysicalHeight !== 'number' || config.pduPhysicalHeight < 0 || config.pduPhysicalHeight > 500)) return false;
-    if (config.pduPhysicalWidth !== undefined && (typeof config.pduPhysicalWidth !== 'number' || config.pduPhysicalWidth < 0 || config.pduPhysicalWidth > 100)) return false;
     if (config.pduCordLength !== undefined && (typeof config.pduCordLength !== 'number' || config.pduCordLength < 0 || config.pduCordLength > 100)) return false;
 
     // Validate rack-mount PDU placement fields
     if (config.rackPreset !== undefined && (typeof config.rackPreset !== 'string' || !(config.rackPreset in RACK_SIZES))) return false;
     if (config.rackDepth !== undefined && (typeof config.rackDepth !== 'number' || config.rackDepth < 10 || config.rackDepth > 200)) return false;
-    if (config.pduVertSpaceU !== undefined && (typeof config.pduVertSpaceU !== 'number' || config.pduVertSpaceU < 0 || config.pduVertSpaceU > 6)) return false;
-    const validInlets = ['C13', 'C14', 'C19', 'C20'];
-    if (config.pduInletType !== undefined && !validInlets.includes(config.pduInletType)) return false;
     const validStrategies = ['bottom', 'top', 'center'];
     if (config.placementStrategy !== undefined && !validStrategies.includes(config.placementStrategy)) return false;
     if (config.deviceDims !== undefined) {
@@ -791,15 +757,32 @@ const updateDeviceTypes = (devices: Device[]) => {
         }
       }
     }
-    if (config.basePduCapacity !== undefined && (typeof config.basePduCapacity !== 'number' || config.basePduCapacity < 0 || config.basePduCapacity > 50000)) return false;
     if (config.safetyMargin !== undefined && (typeof config.safetyMargin !== 'number' || config.safetyMargin < 0 || config.safetyMargin > 100)) return false;
     if (config.powerFactor !== undefined && (typeof config.powerFactor !== 'number' || config.powerFactor < 0 || config.powerFactor > 1)) return false;
-    
-    // Validate socket types
+
+    // Validate the merged PDU library (per-type parameters + quantity)
     const validSocketTypes = ['UK', 'C13', 'C19'];
-    if (config.socketType !== undefined && !validSocketTypes.includes(config.socketType)) return false;
-    if (config.secondarySocketType !== undefined && !validSocketTypes.includes(config.secondarySocketType)) return false;
-    
+    const validInlets = ['C14', 'C20', 'IEC-309-16A', 'IEC-309-32A', 'Hardwired'];
+    if (config.pduLibrary !== undefined) {
+      if (!Array.isArray(config.pduLibrary)) return false;
+      for (const t of config.pduLibrary) {
+        if (typeof t !== 'object' || t === null) return false;
+        if (typeof t.id !== 'string' || typeof t.name !== 'string') return false;
+        if (t.formFactor !== 'vertical' && t.formFactor !== 'horizontal') return false;
+        if (!validSocketTypes.includes(t.socketType)) return false;
+        if (t.secondarySocketType !== undefined && !validSocketTypes.includes(t.secondarySocketType)) return false;
+        if (!validInlets.includes(t.inletType)) return false;
+        for (const key of ['socketCount', 'secondarySocketCount', 'powerCapacity', 'supplyVoltage',
+                           'ratedCurrent', 'circuitCount', 'breakerRatingA', 'physicalHeightCm',
+                           'physicalWidthCm', 'physicalDepthCm', 'cols', 'quantity'] as const) {
+          const v = (t as any)[key];
+          if (v !== undefined && (typeof v !== 'number' || !isFinite(v) || v < 0)) return false;
+        }
+        if (typeof t.isThreePhase !== 'boolean') return false;
+        if (t.mountSide !== undefined && t.mountSide !== 'front' && t.mountSide !== 'back') return false;
+      }
+    }
+
     // Validate activeDevices array structure (basic check)
     if (config.activeDevices !== undefined) {
       if (!Array.isArray(config.activeDevices)) return false;
@@ -810,7 +793,7 @@ const updateDeviceTypes = (devices: Device[]) => {
         if (typeof device.room !== 'string') return false;
       }
     }
-    
+
     return true;
   };
 
@@ -842,23 +825,47 @@ const updateDeviceTypes = (devices: Device[]) => {
                     }
                     
                     if (config.rackSize) { setRackSize(config.rackSize); setTempRackSize(config.rackSize); }
-                    if (config.baseSocketsPerPDU) { setBaseSocketsPerPDU(config.baseSocketsPerPDU); setTempSockets(config.baseSocketsPerPDU); }
-                    if (config.secondarySocketsPerPDU !== undefined) { setSecondarySocketsPerPDU(config.secondarySocketsPerPDU); setTempSecondarySockets(config.secondarySocketsPerPDU); }
-                    if (config.pduCols) setPduCols(config.pduCols);
-                    if (config.pduPhysicalHeight) setPduPhysicalHeight(config.pduPhysicalHeight);
-                    if (config.pduPhysicalWidth) setPduPhysicalWidth(config.pduPhysicalWidth);
                     if (config.pduCordLength) setPduCordLength(config.pduCordLength);
                     if (config.rackPreset) setRackPreset(config.rackPreset);
                     if (config.rackDepth) setRackDepth(config.rackDepth);
-                    if (config.pduVertSpaceU !== undefined) setPduVertSpaceU(config.pduVertSpaceU);
-                    if (config.pduInletType) setPduInletType(config.pduInletType);
                     if (config.placementStrategy) setPlacementStrategy(config.placementStrategy);
                     if (config.deviceDims) setDeviceDims(config.deviceDims);
-                    if (config.basePduCapacity) setBasePduCapacity(config.basePduCapacity);
                     if (config.safetyMargin) setSafetyMargin(config.safetyMargin);
                     if (config.powerFactor) setPowerFactor(config.powerFactor);
-                    if (config.socketType) setSocketType(config.socketType);
-                    if (config.secondarySocketType) setSecondarySocketType(config.secondarySocketType);
+                    // Merged PDU library is the single source of truth for all
+                    // PDU parameters — both diagrams draw from it after load.
+                    if (Array.isArray(config.pduLibrary) && config.pduLibrary.length > 0) {
+                      const lib: PduType[] = config.pduLibrary.map((t: any, i: number) => ({
+                        id: typeof t.id === 'string' ? t.id : `pduTypeImported${i}`,
+                        name: String(t.name ?? `PDU Type ${i + 1}`),
+                        formFactor: t.formFactor === 'horizontal' ? 'horizontal' : 'vertical',
+                        socketType: t.socketType,
+                        socketCount: Math.max(0, Math.floor(t.socketCount ?? 8)),
+                        secondarySocketType: t.secondarySocketType,
+                        secondarySocketCount: Math.max(0, Math.floor(t.secondarySocketCount ?? 0)),
+                        powerCapacity: Math.max(0, t.powerCapacity ?? 7360),
+                        inletType: t.inletType,
+                        supplyVoltage: Math.max(100, t.supplyVoltage ?? 230),
+                        ratedCurrent: Math.max(1, Math.floor(t.ratedCurrent ?? 32)),
+                        isThreePhase: !!t.isThreePhase,
+                        circuitCount: Math.max(1, Math.floor(t.circuitCount ?? 1)),
+                        breakerRatingA: Math.max(6, Math.floor(t.breakerRatingA ?? 16)),
+                        physicalHeightCm: Math.max(1, t.physicalHeightCm ?? 18),
+                        physicalWidthCm: Math.max(1, t.physicalWidthCm ?? 5.5),
+                        physicalDepthCm: Math.max(1, t.physicalDepthCm ?? 7.5),
+                        cols: Math.max(1, Math.min(2, Math.round(t.cols ?? 1))),
+                        mountSide: t.mountSide === 'front' ? 'front' : 'back',
+                        quantity: Math.max(0, Math.floor(t.quantity ?? 1)),
+                      }));
+                      setPduLibrary(lib);
+                      // Keep the id sequence ahead of imported ids.
+                      let maxSeq = 0;
+                      for (const t of lib) {
+                        const m = /^pduType(\d+)$/.exec(t.id);
+                        if (m) maxSeq = Math.max(maxSeq, Number(m[1]));
+                      }
+                      if (maxSeq >= pduSeqRef.current) pduSeqRef.current = maxSeq + 1;
+                    }
                     
                     if (config.activeDevices) {
                         setActiveDevices(withMountDefaults(config.activeDevices as Device[]));
@@ -887,14 +894,11 @@ const updateDeviceTypes = (devices: Device[]) => {
 
   const handleReset = () => {
       setCsvInput(DEFAULT_CSV);
-      setTempSockets(20);
-      setBaseSocketsPerPDU(20);
-      setTempSecondarySockets(4);
-      setSecondarySocketsPerPDU(4);
       setRackSize(48);
       setTempRackSize(48);
       setManualPduPairs(null);
-      setPduCols(1);
+      setManualPlacements({});
+      setVerticalPlacements({});
   };
   
   // Helper to safely create and revoke object URLs
@@ -921,23 +925,15 @@ const updateDeviceTypes = (devices: Device[]) => {
     const config = {
         activeDevices,
         rackSize,
-        baseSocketsPerPDU,
-        secondarySocketsPerPDU,
-        pduCols,
-        pduPhysicalHeight,
-        pduPhysicalWidth,
         pduCordLength,
         rackPreset,
         rackDepth,
-        pduVertSpaceU,
-        pduInletType,
         placementStrategy,
         deviceDims,
-        basePduCapacity,
         safetyMargin,
         powerFactor,
-        socketType,
-        secondarySocketType,
+        // Single source of truth: merged PDU library (Global Config section).
+        pduLibrary,
         csvInput
     };
     const jsonString = JSON.stringify(config, null, 2);
@@ -1445,61 +1441,6 @@ const updateDeviceTypes = (devices: Device[]) => {
                         </div>
                     </div>
 
-                    {/* Primary Sockets */}
-                    <div className="border-b themed-divider pb-3">
-                        <label className="text-xs themed-muted uppercase font-bold">Group 1: Sockets</label>
-                        <div className="flex gap-2 mt-1 mb-2">
-                            <input
-                                type="number" min="1" max="100" aria-label="Primary sockets per PDU"
-                                value={tempSockets} onChange={e => setTempSockets(e.target.value)}
-                                className="w-full themed-input border rounded p-2"
-                            />
-                            <button onClick={handleApplySockets} className="bg-blue-600 hover:bg-blue-500 text-white px-2 rounded text-xs font-bold">SET</button>
-                        </div>
-                        <select
-                            aria-label="Primary socket type"
-                            value={socketType} onChange={e => setSocketType(e.target.value as SocketType)}
-                            className="w-full themed-input border rounded p-2 text-sm"
-                        >
-                            <option value="UK">UK (Type G)</option>
-                            <option value="C13">C13 (IEC)</option>
-                            <option value="C19">C19 (IEC)</option>
-                        </select>
-                    </div>
-
-                    {/* Secondary Sockets */}
-                    <div className="border-b themed-divider pb-3">
-                        <label className="text-xs themed-muted uppercase font-bold">Group 2: Sockets</label>
-                        <div className="flex gap-2 mt-1 mb-2">
-                            <input
-                                type="number" min="0" max="16" aria-label="Secondary sockets per PDU"
-                                value={tempSecondarySockets} onChange={e => setTempSecondarySockets(e.target.value)}
-                                className="w-full themed-input border rounded p-2"
-                            />
-                            <button onClick={handleApplySecondarySockets} className="bg-blue-600 hover:bg-blue-500 text-white px-2 rounded text-xs font-bold">SET</button>
-                        </div>
-                        <select
-                            aria-label="Secondary socket type"
-                            value={secondarySocketType} onChange={e => setSecondarySocketType(e.target.value as SocketType)}
-                            className="w-full themed-input border rounded p-2 text-sm"
-                        >
-                            <option value="UK">UK (Type G)</option>
-                            <option value="C13">C13 (IEC)</option>
-                            <option value="C19">C19 (IEC)</option>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label className="text-xs themed-muted uppercase font-bold">Total PDU Capacity</label>
-                        <select
-                            aria-label="Total PDU capacity"
-                            value={basePduCapacity} onChange={e => setBasePduCapacity(Number(e.target.value))}
-                            className="w-full themed-input border rounded p-2 mt-1"
-                        >
-                            {PDU_VARIANTS.map(v => <option key={v.power} value={v.power}>{v.name}</option>)}
-                        </select>
-                    </div>
-
                     {/* Inferred Specs Display */}
                     <div className="border-b themed-divider pb-3 pt-2">
                         <div className="text-[10px] uppercase font-bold themed-dim mb-1 flex items-center gap-1">
@@ -1558,87 +1499,22 @@ const updateDeviceTypes = (devices: Device[]) => {
                         </div>
                     </div>
 
-                    {/* PDU Physical Specs */}
-                    <div className="border-b themed-divider pb-3">
-                        <label className="text-xs themed-muted uppercase font-bold">PDU Dimensions</label>
-                        <div className="grid grid-cols-2 gap-2 mt-1">
-                            <div>
-                                <span className="text-[10px] themed-dim block">Height (cm)</span>
-                                <input
-                                    type="number" min="1" aria-label="PDU height in cm"
-                                    value={pduPhysicalHeight} onChange={e => setPduPhysicalHeight(Number(e.target.value))}
-                                    className="w-full themed-input border rounded p-2"
-                                />
-                            </div>
-                            <div>
-                                <span className="text-[10px] themed-dim block">Width (cm)</span>
-                                <input
-                                    type="number" min="1" aria-label="PDU width in cm"
-                                    value={pduPhysicalWidth} onChange={e => setPduPhysicalWidth(Number(e.target.value))}
-                                    className="w-full themed-input border rounded p-2"
-                                />
-                            </div>
-                        </div>
-                         <div className="mt-2 border-t themed-divider pt-2">
-                            <label className="text-xs themed-muted uppercase font-bold">PDU Layout</label>
-                            <select
-                                aria-label="PDU socket layout"
-                                value={pduCols} onChange={e => setPduCols(Number(e.target.value))}
-                                className="w-full themed-input border rounded p-2 mt-1 text-sm"
-                            >
-                                <option value={1}>Single Column (Standard)</option>
-                                <option value={2}>Double Column (Wide)</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    {/* Rack-Mount PDU Placement */}
+                    {/* Rack-Mount PDU Placement — reads from the merged PDU Library */}
                     <div className="border-b themed-divider pb-3">
                         <label className="text-xs themed-muted uppercase font-bold flex items-center justify-between">
                             <span>Rack-Mount PDU Placement</span>
                             <span className="text-[10px] px-1.5 py-0.5 rounded themed-input themed-dim border themed-divider">
-                                {pduFormFactor === 'vertical' ? 'VERTICAL 0U' : `${pduMountSide.toUpperCase()}-${placementStrategy === 'bottom' ? 'BOTTOM' : placementStrategy === 'top' ? 'TOP' : 'CENTER'}`}
+                                {(() => {
+                                  const anyVert = pduInstances.some(p => p.formFactor === 'vertical');
+                                  const anyHoriz = pduInstances.some(p => p.formFactor === 'horizontal');
+                                  if (anyVert && anyHoriz) return 'VERT 0U + HORIZ';
+                                  if (anyVert) return 'VERTICAL 0U';
+                                  if (anyHoriz) return `${placementStrategy.toUpperCase()} BAND`;
+                                  return 'NO PDUs DEFINED';
+                                })()}
                             </span>
                         </label>
                         <div className="grid grid-cols-2 gap-2 mt-2">
-                            <div>
-                                <span className="text-[10px] themed-dim block">PDU Form Factor</span>
-                                <select
-                                    aria-label="PDU form factor"
-                                    value={pduFormFactor}
-                                    onChange={e => setPduFormFactor(e.target.value as PduFormFactor)}
-                                    className="w-full themed-input border rounded p-2 text-sm"
-                                >
-                                    <option value="vertical">Vertical (zero-U, rear rails)</option>
-                                    <option value="horizontal">Horizontal (rack-mount, uses U space)</option>
-                                </select>
-                            </div>
-                            {pduFormFactor === 'horizontal' && (
-                            <div>
-                                <span className="text-[10px] themed-dim block">Default Mounting Rail</span>
-                                <select
-                                    aria-label="PDU mounting rail"
-                                    value={pduMountSide}
-                                    onChange={e => setPduMountSide(e.target.value as MountSide)}
-                                    className="w-full themed-input border rounded p-2 text-sm"
-                                >
-                                    <option value="back">Back (rear rails)</option>
-                                    <option value="front">Front</option>
-                                </select>
-                            </div>
-                            )}
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 mt-2">
-                            <div>
-                                <span className="text-[10px] themed-dim block">PDU Depth (cm)</span>
-                                <input
-                                    type="number" min="1" max={Math.max(2, rackDepth - 2)} step="0.5"
-                                    aria-label="PDU physical depth in centimetres"
-                                    value={pduHorizontalDepthCm}
-                                    onChange={e => setPduHorizontalDepthCm(Number(e.target.value))}
-                                    className="w-full themed-input border rounded p-2 text-sm"
-                                />
-                            </div>
                             <div>
                                 <span className="text-[10px] themed-dim block">Rack Depth (cm)</span>
                                 <input
@@ -1649,37 +1525,13 @@ const updateDeviceTypes = (devices: Device[]) => {
                                     className="w-full themed-input border rounded p-2 text-sm"
                                 />
                             </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 mt-2">
-                            <div>
-                                <span className="text-[10px] themed-dim block">Vertical Space (U)</span>
-                                <select
-                                    aria-label="PDU vertical space in U"
-                                    value={pduVertSpaceU}
-                                    onChange={e => setPduVertSpaceU(Number(e.target.value))}
-                                    className="w-full themed-input border rounded p-2 text-sm"
-                                >
-                                    <option value={0}>AUTO ({autoRequiredU}U)</option>
-                                    {[1,2,3,4,5,6].map(u => <option key={u} value={u}>{u}U</option>)}
-                                </select>
-                            </div>
-                            <div>
-                                <span className="text-[10px] themed-dim block">Inlet Type</span>
-                                <select
-                                    aria-label="PDU inlet type"
-                                    value={pduInletType}
-                                    onChange={e => setPduInletType(e.target.value as keyof typeof CORD_BEND_CM)}
-                                    className="w-full themed-input border rounded p-2 text-sm"
-                                >
-                                    <option value="C13">C13 cord ({CORD_BEND_CM.C13} cm bend)</option>
-                                    <option value="C14">Fixed C14 inlet ({CORD_BEND_CM.C14} cm bend)</option>
-                                    <option value="C19">C19 cord ({CORD_BEND_CM.C19} cm bend)</option>
-                                    <option value="C20">Fixed C20 inlet ({CORD_BEND_CM.C20} cm bend)</option>
-                                </select>
+                            <div className="themed-input border rounded p-2 text-[10px] themed-dim flex flex-col justify-center">
+                                <span>H-PDU span: <b className="themed-muted">{autoRequiredU}U AUTO</b></span>
+                                <span>Inlet bend: <b className="themed-muted">{CORD_BEND_CM[pduInletType]} cm</b></span>
                             </div>
                         </div>
                         <div className="mt-2">
-                            <span className="text-[10px] themed-dim block">Placement Strategy {pduFormFactor === 'horizontal' ? '(horizontal PDUs)' : '(rear mounting rails)'}</span>
+                            <span className="text-[10px] themed-dim block">Placement Strategy (horizontal PDUs; vertical strips use rear L/R channels)</span>
                             <select
                                 aria-label="PDU placement strategy"
                                 value={placementStrategy}
