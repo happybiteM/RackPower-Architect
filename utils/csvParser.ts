@@ -133,6 +133,7 @@ export const parseCSV = (csvText: string): RackGroup[] => {
         connectionType: connectionType,
         uHeight: uHeight,
         uPosition: null, // Assigned later
+        mountSide: 'front' as const,
         psuConnections: {}
       };
 
@@ -161,11 +162,11 @@ export const parseCSV = (csvText: string): RackGroup[] => {
              conns[p] = null;
         }
 
-        return { ...d, mountSide: "front", uPosition: pos, psuConnections: conns };
+        return { ...d, mountSide: 'front' as const, uPosition: pos, psuConnections: conns };
       }
       
       // Device doesn't fit in rack
-      return { ...d, uPosition: null, psuConnections: {} }; 
+      return { ...d, mountSide: 'front' as const, uPosition: null, psuConnections: {} }; 
     });
 
     const totalPower = positionedDevices.reduce((sum, d) => sum + d.powerRatingPerDevice, 0);
