@@ -96,8 +96,10 @@ export interface PDUConfig {
   mountSide: MountSide;
   /** Manual U position override (top-most occupied U). Null = auto placement. */
   uPosition: number | null;
-  /** Physical body height in cm (used by placement calc & side-view drawing). */
+  /** Vertical strip length in cm (vertical PDUs only). */
   physicalHeightCm: number;
+  /** Rack-mount PDU body height in U (horizontal PDUs only). */
+  uHeight: number;
   /** Physical body depth in cm (drawn to scale in the side view). */
   physicalDepthCm: number;
 }
@@ -227,11 +229,16 @@ export interface PduType {
   isThreePhase: boolean;
   circuitCount: number;       // protected line inputs / branch circuits
   breakerRatingA: number;     // upstream breaker rating (A)
-  /** Physical body height in cm (vertical strips: length along the rail). */
+  /** Vertical strip length in cm — used ONLY for vertical (zero-U) PDUs,
+   *  which hang in the rear cable channels and consume no rack units. */
   physicalHeightCm: number;
+  /** Rack-mount PDU body height in U (1U / 2U …). Horizontal PDUs are sized
+   *  in U — centimetre heights are not configurable for them. */
+  uHeight: number;
   /** Physical body width in cm (horizontal PDUs — faceplate width). */
   physicalWidthCm: number;
-  /** Physical body depth in cm (drawn to scale in the side view). */
+  /** Physical body depth in cm (drawn to scale in the side view). This is the
+   *  only linear dimension configurable for rack-based (horizontal) PDUs. */
   physicalDepthCm: number;
   /** Socket column layout on the PDU face (1 = single column, 2 = wide). */
   cols: number;

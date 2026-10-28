@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Device,
   PDUConfig,
@@ -24,8 +24,9 @@ import { DEFAULT_DEVICE_DIM, MM_PER_U } from '../utils/placement';
  *   pure space-planning diagram. They appear in the rear elevation and reports.
  * - Dragging uses a grab offset captured at pointer-down so the component
  *   follows the cursor exactly (no inversion / jump-to-corner behaviour).
- * - Cabling is colour-coded by feed: blue = Feed A, red = Feed B; solid lines
- *   originate at the device's FRONT PSU outlet, dashed lines at the REAR outlet.
+ * - No cabling is drawn here — this diagram is purely for space planning
+ *   (depths, U positions, front/back rails). Cable routing lives in the
+ *   front elevation and wiring diagrams.
  */
 
 interface Props {
@@ -72,7 +73,9 @@ const RackSideView: React.FC<Props> = ({
   onSetDeviceSide,
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const [drag, setDrag] = useState<{
+  // Drag state lives in a ref (not React state) so pointer-move never waits for
+  // a re-render; the dragged item is drawn from the same ref during render.
+  const dragRef = useRef<{
     id: string;
     kind: 'device' | 'pdu';
     /** Cursor offset inside the grabbed item (px), captured at pointer-down. */
@@ -84,6 +87,7 @@ const RackSideView: React.FC<Props> = ({
     w: number;
     hPx: number;
   } | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
   const [hoverU, setHoverU] = useState<number | null>(null);
 
   const depthPx = rackDepthCm * PX_PER_CM;
@@ -115,24 +119,10 @@ const RackSideView: React.FC<Props> = ({
   const mountedDevices = devices.filter(d => d.uPosition !== null);
   const horizontalPdus = pdus.filter(p => p.formFactor === 'horizontal');
 
-  const pduById = useMemo(() => Object.fromEntries(pdus.map(p => [p.id, p])), [pdus]);
   const placedById = useMemo(
     () => Object.fromEntries(placement.placements.filter(p => p.formFactor === 'horizontal').map(p => [p.pduId, p])),
     [placement],
   );
-
-  // Socket Y lookup for cabling: map (pduId, socketIndex) -> approximate y.
-  const socketY = (pduId: string, socketIndex: number): number | null => {
-    const pl = placedById[pduId];
-    if (!pl) return null;
-    const pdu = pduById[pduId];
-    if (!pdu || pdu.formFactor === 'vertical') return null; // vertical PDUs not drawn here
-    const bodyTopY = uTopY(pl.uPosition) + 1;
-    const bodyH = Math.max(U_HEIGHT_PX * pl.uSpan - 2, 8);
-    const n = Math.max(1, pdu.socketCount + (pdu.secondarySocketCount || 0));
-    const frac = n > 1 ? socketIndex / (n - 1) : 0.5;
-    return bodyTopY + frac * (bodyH - 4) + 2;
-  };
 
   /** Convert a client (mouse) point into SVG user-space coordinates. */
   const clientToSvg = (clientX: number, clientY: number) => {
@@ -145,52 +135,74 @@ const RackSideView: React.FC<Props> = ({
   };
 
   // ---- Drag handlers ---------------------------------------------------------
-  // Grab offset is captured at pointer-down so the item follows the cursor
-  // exactly — this fixes the previous "inverted drag" where items jumped so
-  // their top-left corner landed on the cursor and moved opposite to intent.
+  // Root cause of the previous "inverted drag": pointer-move was attached to
+  // each item's <g>. Once the item moved out from under the cursor (or React
+  // re-rendered mid-drag), events stopped firing / fired against stale state,
+  // making movement feel reversed and jumpy. Fix: capture the grab offset at
+  // pointer-down, then handle ALL move/up events on the <svg> itself via
+  // window listeners while dragging. The item follows the cursor exactly from
+  // the point you grabbed it.
   const startDrag = (geom: { id: string; kind: 'device' | 'pdu'; x: number; y: number; w: number; hPx: number }) =>
     (e: React.PointerEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
       const p = clientToSvg(e.clientX, e.clientY);
       if (!p) return;
-      // geom carries x/y (current top-left) — remap to the state's x0/y0 fields.
-      setDrag({
+      dragRef.current = {
         id: geom.id, kind: geom.kind,
         grabX: p.x - geom.x, grabY: p.y - geom.y,
         x0: geom.x, y0: geom.y, w: geom.w, hPx: geom.hPx,
-      });
+      };
+      setDragId(geom.id);
     };
 
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!drag) return;
-    const p = clientToSvg(e.clientX, e.clientY);
-    if (!p) return;
+  useEffect(() => {
+    if (!dragId) return;
 
-    // New top-left of the dragged rectangle (cursor minus grab offset).
-    const newX = p.x - drag.grabX;
-    const newY = p.y - drag.grabY;
+    const onMove = (e: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const p = clientToSvg(e.clientX, e.clientY);
+      if (!p) return;
 
-    // Horizontal rail choice from the item's CENTRE (not the cursor), so
-    // dragging feels natural near the midline.
-    const centerX = newX + drag.w / 2;
-    const side: MountSide = centerX < MARGIN_X + innerW / 2 ? 'front' : 'back';
+      // New top-left of the dragged rectangle (cursor minus grab offset).
+      const newX = p.x - d.grabX;
+      const newY = p.y - d.grabY;
 
-    // Vertical placement: align the item's TOP edge to a U slot. Using the top
-    // edge keeps multi-U items from being off-by-one when grabbed mid-body.
-    const u = clamp(Math.round((newY - MARGIN_TOP) / U_HEIGHT_PX) + 1, 1, rackSizeU);
-    setHoverU(u);
+      // Horizontal rail choice from the item's CENTRE (not the cursor), so
+      // dragging feels natural near the midline.
+      const centerX = newX + d.w / 2;
+      const side: MountSide = centerX < MARGIN_X + innerW / 2 ? 'front' : 'back';
 
-    if (drag.kind === 'device') {
-      onMoveDevice(drag.id, u);
-      onSetDeviceSide(drag.id, side);
-    } else {
-      onPlacePdu(drag.id, u, side);
-    }
-  };
+      // Vertical placement: align the item's TOP edge to a U slot. Using the top
+      // edge keeps multi-U items from being off-by-one when grabbed mid-body.
+      const u = clamp(Math.round((newY - MARGIN_TOP) / U_HEIGHT_PX) + 1, 1, rackSizeU);
+      setHoverU(u);
 
-  const endDrag = () => { setDrag(null); setHoverU(null); };
+      if (d.kind === 'device') {
+        onMoveDevice(d.id, u);
+        onSetDeviceSide(d.id, side);
+      } else {
+        onPlacePdu(d.id, u, side);
+      }
+    };
+
+    const onUp = () => {
+      dragRef.current = null;
+      setDragId(null);
+      setHoverU(null);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragId, innerW, rackSizeU]);
 
   // ---- Render helpers --------------------------------------------------------
   const renderDevice = (d: Device) => {
@@ -200,13 +212,10 @@ const RackSideView: React.FC<Props> = ({
     const h = Math.max(d.uHeight * U_HEIGHT_PX - 2, 6);
     const y = uTopY(d.uPosition!) + 1;
     const x = d.mountSide === 'front' ? xFrontRail + RAIL_W : xBackRail - w;
-    const selected = drag?.id === d.id;
+    const selected = dragId === d.id;
     return (
-      <g key={d.id} style={{ cursor: 'grab' }}
-         onPointerDown={startDrag({ id: d.id, kind: 'device', x, y, w, hPx: h })}
-         onPointerMove={handlePointerMove}
-         onPointerUp={endDrag}
-         onPointerCancel={endDrag}>
+      <g key={d.id} style={{ cursor: selected ? 'grabbing' : 'grab' }}
+         onPointerDown={startDrag({ id: d.id, kind: 'device', x, y, w, hPx: h })}>
         <title>{`${d.name} · ${d.uHeight}U · depth ${depthCm.toFixed(0)} cm · mounted ${d.mountSide}`}</title>
         <rect x={x} y={y} width={w} height={h} rx={2}
               fill={selected ? '#fbbf24' : '#cbd5e1'} stroke={selected ? '#b45309' : '#64748b'} strokeWidth={1} />
@@ -231,9 +240,7 @@ const RackSideView: React.FC<Props> = ({
       return (
         <g key={pdu.id}
            style={{ cursor: 'grab' }}
-           onPointerDown={startDrag({ id: pdu.id, kind: 'pdu', x: px, y: py, w: 60, hPx: 12 })}
-           onPointerMove={handlePointerMove}
-           onPointerUp={endDrag}>
+           onPointerDown={startDrag({ id: pdu.id, kind: 'pdu', x: px, y: py, w: 60, hPx: 12 })}>
           <title>{`${pdu.id}: unplaced — drag into the rack`}</title>
           <rect x={px} y={py} width={60} height={12} rx={2} fill="none" stroke="#94a3b8" strokeDasharray="3 2" />
           <text x={px + 30} y={py + 9} textAnchor="middle" fontSize={8} fill="#94a3b8">{pdu.id} ⚠</text>
@@ -247,13 +254,11 @@ const RackSideView: React.FC<Props> = ({
     const h = Math.max(pl.uSpan * U_HEIGHT_PX - 2, 8);
     const y = uTopY(pl.uPosition) + 1;
     const x = pl.mountSide === 'front' ? xFrontRail + RAIL_W : xBackRail - w;
-    const selected = drag?.id === pdu.id;
+    const selected = dragId === pdu.id;
     const inletLabel = pdu.inletType === 'Hardwired' ? 'HW' : pdu.inletType.replace('IEC-309-', '');
     return (
-      <g key={pdu.id} style={{ cursor: 'grab' }}
+      <g key={pdu.id} style={{ cursor: selected ? 'grabbing' : 'grab' }}
          onPointerDown={startDrag({ id: pdu.id, kind: 'pdu', x, y, w, hPx: h })}
-         onPointerMove={handlePointerMove}
-         onPointerUp={endDrag}
          onDoubleClick={() => onResetPdu(pdu.id)}>
         <title>{`${pdu.id} (${pdu.side === 'A' ? 'Feed A' : 'Feed B'}) · ${isManual ? 'manual' : 'auto'} @ U${pl.uPosition - pl.uSpan + 1}–${pl.uPosition} · ${pl.mountSide} · depth ${depthCm.toFixed(1)} cm · inlet ${pdu.inletType} · ${pdu.isThreePhase ? '3φ' : '1φ'} ${pdu.supplyVoltage}V ${pdu.ratedCurrent}A (${pdu.circuitCount}×${pdu.breakerRatingA}A) · dbl-click to auto`}</title>
         <rect x={x} y={y} width={w} height={h} rx={2}
@@ -271,39 +276,7 @@ const RackSideView: React.FC<Props> = ({
     );
   };
 
-  // Cables: device PSU outlet → PDU socket. Solid = from front outlet, dashed = rear outlet.
-  const cables: React.ReactNode[] = [];
-  mountedDevices.forEach(d => {
-    Object.entries(d.psuConnections).forEach(([psuStr, conn]) => {
-      if (!conn) return;
-      const psuIdx = parseInt(psuStr);
-      const sy = socketY(conn.pduId, conn.socketIndex);
-      if (sy === null) return;
-      const pl = placedById[conn.pduId];
-      const pdu = pduById[conn.pduId];
-      if (!pdu || !pl) return;
-      const color = pdu.side === 'A' ? FEED_A_COLOR : FEED_B_COLOR;
-      const dim = deviceDims[d.name] || defaultDeviceDim;
-      const depthCm = clamp(dim.depth > 0 ? dim.depth : 65, 2, rackDepthCm - 2);
-      const w = depthCm * PX_PER_CM;
-      const outletX = d.mountSide === 'front'
-        ? (psuIdx === 0 ? xFrontRail + RAIL_W + 2 : xFrontRail + RAIL_W + w - 2)
-        : (psuIdx === 0 ? xBackRail - w + 2 : xBackRail - 2);
-      const dy = uTopY(d.uPosition!) + Math.max(d.uHeight * U_HEIGHT_PX - 2, 6) / 2 + 1;
-      const pdw = clamp(pl.depthCm > 0 ? pl.depthCm : 7.5, 1.5, rackDepthCm - 2) * PX_PER_CM;
-      const ex = pl.mountSide === 'front' ? xFrontRail + RAIL_W + pdw - 2 : xBackRail - pdw + 2;
-      const midY = (dy + sy) / 2;
-      cables.push(
-        <path key={`${d.id}-${psuIdx}`}
-              d={`M ${outletX} ${dy} C ${outletX} ${midY}, ${ex} ${midY}, ${ex} ${sy}`}
-              fill="none" stroke={color} strokeWidth={1.3}
-              strokeDasharray={psuIdx === 0 ? undefined : '4 3'}
-              opacity={0.75} pointerEvents="none" />
-      );
-    });
-  });
-
-  const uTicks = Array.from({ length: rackSizeU }, (_, i) => i + 1);
+    const uTicks = Array.from({ length: rackSizeU }, (_, i) => i + 1);
 
   return (
     <svg ref={svgRef} viewBox={`0 0 ${totalW} ${totalH}`} width={totalW} height={totalH}
@@ -343,15 +316,12 @@ const RackSideView: React.FC<Props> = ({
       {mountedDevices.map(renderDevice)}
       {horizontalPdus.map(renderHorizontalPdu)}
 
-      {/* Cables on top */}
-      {cables}
-
       {/* Legend */}
       <g transform={`translate(${MARGIN_X}, ${MARGIN_TOP + rackH + 22})`} fontSize={8} fill="#334155">
-        <line x1={0} x2={16} y1={0} y2={0} stroke={FEED_A_COLOR} strokeWidth={1.5} />
-        <text x={20} y={3}>Feed A (solid = PSU1/front outlet)</text>
-        <line x1={170} x2={186} y1={0} y2={0} stroke={FEED_B_COLOR} strokeWidth={1.5} />
-        <text x={190} y={3}>Feed B (dashed = PSU2/rear outlet)</text>
+        <rect x={0} y={-5} width={14} height={10} fill={FEED_A_COLOR} opacity={0.85} rx={2} />
+        <text x={18} y={3}>Feed A PDU</text>
+        <rect x={110} y={-5} width={14} height={10} fill={FEED_B_COLOR} opacity={0.85} rx={2} />
+        <text x={128} y={3}>Feed B PDU</text>
         <rect x={350} y={-5} width={10} height={10} fill="#cbd5e1" stroke="#64748b" />
         <text x={364} y={3}>Device (width = depth)</text>
         <rect x={470} y={-5} width={10} height={10} fill="#2563eb" opacity={0.85} stroke="#0f172a" strokeDasharray="2 1" />
