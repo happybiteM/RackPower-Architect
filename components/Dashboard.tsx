@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { parseCSV } from '../utils/csvParser';
 import { DEFAULT_CSV, PDU_VARIANTS } from '../constants';
 import RackVisualizer from './RackVisualizer';
-import { Device, PSUConnection, SocketType, PDUConfig, PduType, PhysicalDimensions, RACK_SIZES, CORD_BEND_CM, PduPlacementStrategy, MountSide, PduFormFactor, ManualPlacementMap, VerticalPlacementMap, VerticalChannel } from '../types';
+import { Device, PSUConnection, SocketType, PDUConfig, PduType, PhysicalDimensions, RACK_SIZES, CORD_BEND_CM, PduPlacementStrategy, MountSide, PduFormFactor, ManualPlacementMap, VerticalPlacementMap, VerticalChannel, PduInletType, INLET_MAX_AMPS, INLET_WIRE_MM2 } from '../types';
 import { calculatePduPlacement, DEFAULT_DEVICE_DIM, pduRequiredU } from '../utils/placement';
 import RackSideView from './RackSideView';
 import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus, Zap, Sun, Moon, LayoutDashboard, Boxes, ClipboardList, AlertTriangle } from 'lucide-react';
@@ -76,12 +76,16 @@ const Dashboard: React.FC = () => {
     {
       id: 'vertA', name: 'Vertical 0U · C13 x20', formFactor: 'vertical',
       socketType: 'C13', socketCount: 20, secondarySocketType: 'C19', secondarySocketCount: 4,
-      powerCapacity: 7360, physicalHeightCm: 183, physicalDepthCm: 5.6, quantity: 2,
+      powerCapacity: 7360, inletType: 'IEC-309-32A', supplyVoltage: 230, ratedCurrent: 32,
+      isThreePhase: false, circuitCount: 2, breakerRatingA: 16,
+      physicalHeightCm: 183, physicalDepthCm: 5.6, quantity: 2,
     },
     {
       id: 'horiz1U', name: 'Horizontal 1U · C13 x8', formFactor: 'horizontal',
       socketType: 'C13', socketCount: 8, secondarySocketType: undefined, secondarySocketCount: 0,
-      powerCapacity: 7360, physicalHeightCm: 4.4, physicalDepthCm: 7.5, quantity: 0,
+      powerCapacity: 7360, inletType: 'C20', supplyVoltage: 230, ratedCurrent: 20,
+      isThreePhase: false, circuitCount: 2, breakerRatingA: 16,
+      physicalHeightCm: 4.4, physicalDepthCm: 7.5, quantity: 0,
     },
   ]));
 
@@ -176,6 +180,12 @@ const Dashboard: React.FC = () => {
     secondarySocketType: 'C19',
     secondarySocketCount: 4,
     powerCapacity: basePduCapacity,
+    inletType: 'IEC-309-32A',
+    supplyVoltage: pduSpecs.voltage,
+    ratedCurrent: 32,
+    isThreePhase: false,
+    circuitCount: pduSpecs.circuits,
+    breakerRatingA: 16,
     physicalHeightCm: 183,
     physicalDepthCm: 5.6,
     quantity: 1,
@@ -213,6 +223,12 @@ const Dashboard: React.FC = () => {
           secondarySocketType: t.secondarySocketType,
           secondarySocketCount: t.secondarySocketCount ?? 0,
           powerCapacity: basePduCapacity,   // same power rating config for vertical & horizontal PDUs
+          inletType: t.inletType,
+          supplyVoltage: t.supplyVoltage,
+          ratedCurrent: t.ratedCurrent,
+          isThreePhase: t.isThreePhase,
+          circuitCount: t.circuitCount,
+          breakerRatingA: t.breakerRatingA,
           formFactor: t.formFactor,
           physicalHeightCm: t.physicalHeightCm,
           physicalDepthCm: t.physicalDepthCm,
@@ -252,6 +268,12 @@ const Dashboard: React.FC = () => {
           secondarySocketType: template.secondarySocketType,
           secondarySocketCount: template.secondarySocketCount ?? 0,
           powerCapacity: basePduCapacity,
+          inletType: template.inletType,
+          supplyVoltage: template.supplyVoltage,
+          ratedCurrent: template.ratedCurrent,
+          isThreePhase: template.isThreePhase,
+          circuitCount: template.circuitCount,
+          breakerRatingA: template.breakerRatingA,
           formFactor: template.formFactor,
           physicalHeightCm: template.physicalHeightCm,
           physicalDepthCm: template.physicalDepthCm,
@@ -270,6 +292,12 @@ const Dashboard: React.FC = () => {
             secondarySocketType: secondarySocketType,
             secondarySocketCount: secondarySocketsPerPDU,
             powerCapacity: basePduCapacity,   // same power rating config for vertical & horizontal PDUs
+            inletType: pduInletType === 'C14' || pduInletType === 'C20' ? pduInletType : (pduSpecs.amps >= 32 ? 'IEC-309-32A' as const : 'IEC-309-16A' as const),
+            supplyVoltage: pduSpecs.voltage,
+            ratedCurrent: pduSpecs.isThreePhase ? pduSpecs.amps : pduSpecs.amps * pduSpecs.circuits,
+            isThreePhase: pduSpecs.isThreePhase,
+            circuitCount: pduSpecs.circuits,
+            breakerRatingA: pduSpecs.amps,
             formFactor: pduFormFactor,
             physicalHeightCm: pduPhysicalHeight / 10,
             physicalDepthCm: pduHorizontalDepthCm,
@@ -1891,8 +1919,88 @@ const updateDeviceTypes = (devices: Device[]) => {
                                         />
                                     </div>
                                 </div>
-                                <div className="text-[10px] themed-dim flex justify-between">
+                                {/* ---- Power input configuration (inlet + supply) ---- */}
+                                <div className="pt-2 mt-1 border-t themed-divider grid grid-cols-2 gap-2">
+                                    <div className="col-span-2 text-[10px] themed-dim font-semibold uppercase tracking-wide">Power Input</div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Inlet / Plug</span>
+                                        <select
+                                            aria-label={`${t.name} inlet type`}
+                                            value={t.inletType}
+                                            onChange={e => {
+                                                const inlet = e.target.value as PduInletType;
+                                                const maxA = INLET_MAX_AMPS[inlet];
+                                                updatePduType(t.id, {
+                                                    inletType: inlet,
+                                                    ratedCurrent: Math.min(t.ratedCurrent, maxA),
+                                                    breakerRatingA: Math.min(t.breakerRatingA, maxA),
+                                                });
+                                            }}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        >
+                                            <option value="C14">IEC C14 (16 A)</option>
+                                            <option value="C20">IEC C20 (20 A)</option>
+                                            <option value="IEC-309-16A">IEC 60309 16 A</option>
+                                            <option value="IEC-309-32A">IEC 60309 32 A</option>
+                                            <option value="Hardwired">Hardwired (≤63 A)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Supply</span>
+                                        <select
+                                            aria-label={`${t.name} supply phase`}
+                                            value={t.isThreePhase ? '3' : '1'}
+                                            onChange={e => updatePduType(t.id, { isThreePhase: e.target.value === '3' })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        >
+                                            <option value="1">1-Phase</option>
+                                            <option value="3">3-Phase</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Voltage (V)</span>
+                                        <input
+                                            type="number" min="100" max="690" step="1"
+                                            aria-label={`${t.name} supply voltage`}
+                                            value={t.supplyVoltage}
+                                            onChange={e => updatePduType(t.id, { supplyVoltage: Math.max(100, Math.min(690, Number(e.target.value) || 230)) })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        />
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Rated Current (A/φ)</span>
+                                        <input
+                                            type="number" min="1" max={INLET_MAX_AMPS[t.inletType]} step="1"
+                                            aria-label={`${t.name} rated current per phase`}
+                                            value={t.ratedCurrent}
+                                            onChange={e => updatePduType(t.id, { ratedCurrent: Math.max(1, Math.min(INLET_MAX_AMPS[t.inletType], Math.floor(Number(e.target.value) || 1))) })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        />
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Line Inputs / Circuits</span>
+                                        <input
+                                            type="number" min="1" max="6" step="1"
+                                            aria-label={`${t.name} number of circuits`}
+                                            value={t.circuitCount}
+                                            onChange={e => updatePduType(t.id, { circuitCount: Math.max(1, Math.min(6, Math.floor(Number(e.target.value) || 1))) })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        />
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Breaker (A/circuit)</span>
+                                        <input
+                                            type="number" min="6" max="63" step="1"
+                                            aria-label={`${t.name} breaker rating per circuit`}
+                                            value={t.breakerRatingA}
+                                            onChange={e => updatePduType(t.id, { breakerRatingA: Math.max(6, Math.min(INLET_MAX_AMPS[t.inletType], Math.floor(Number(e.target.value) || 6))) })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="text-[10px] themed-dim flex justify-between gap-2 flex-wrap">
                                     <span>Power rating: <b>{basePduCapacity.toLocaleString()}W</b> (shared config)</span>
+                                    <span>Inlet limit {INLET_MAX_AMPS[t.inletType]} A · feed wire {INLET_WIRE_MM2[t.inletType]}</span>
                                     <span>{isVert ? `${Math.ceil((t.physicalHeightCm * 10) / 44.45)}U of ${rackSize}U per strip` : `~${Math.max(1, Math.ceil((t.physicalHeightCm * 10) / 44.45))}U each`}</span>
                                 </div>
                             </div>
@@ -1962,11 +2070,11 @@ const updateDeviceTypes = (devices: Device[]) => {
                      <div className="mt-6 border-t themed-divider pt-4">
                         <h3 className="text-sm font-bold text-slate-800 mb-2">Side View — Mounting Depth & PDU Placement</h3>
                         <p className="text-[11px] text-slate-500 mb-3 max-w-[720px]">
-                            Drag components vertically to change U position, or horizontally between the FRONT (left) and BACK (right) rails.
-                            Horizontal PDUs marked with * are manually placed — double-click one to return it to automatic placement.
+                            Drag components vertically to change U position, or horizontally between the FRONT (left) and BACK (right) rails. The item follows your cursor from the exact point you grabbed it — no jumping.
+                            Horizontal PDUs marked with * are manually placed — double-click one to return it to automatic placement. The small white notch on each PDU marks its cable inlet end; the label shows the configured inlet type.
                             Rectangle width shows each item's configured physical depth to scale.
                             Cables: <span className="font-bold text-blue-600">blue = Feed A</span>, <span className="font-bold text-red-600">red = Feed B</span>;
-                            solid = PSU 1 outlet, dashed = PSU 2 outlet; vertical PDUs render as full-height dashed strips on the rear rail.
+                            solid = PSU 1 outlet, dashed = PSU 2 outlet. Vertical zero-U PDUs occupy no rack units and hang in the rear L/R cable channels, so they are intentionally not shown here — manage them in the PDU Library and view them in the rear elevation &amp; reports.
                         </p>
                         <div className="overflow-x-auto">
                           <RackSideView
@@ -1983,7 +2091,6 @@ const updateDeviceTypes = (devices: Device[]) => {
                             onResetPdu={handleResetPduPlacement}
                             onMoveDevice={handleMoveDevice}
                             onSetDeviceSide={handleSetDeviceSide}
-                            onSetVerticalChannel={handleSetVerticalChannel}
                           />
                         </div>
                      </div>

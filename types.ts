@@ -41,6 +41,29 @@ export type SocketType = 'UK' | 'C13' | 'C19';
 /** How a PDU is physically installed in the rack. */
 export type PduFormFactor = 'vertical' | 'horizontal';
 
+/** IEC 60309 / hard-wired inlet options for the PDU power input. */
+export type PduInletType = 'C14' | 'C20' | 'IEC-309-16A' | 'IEC-309-32A' | 'Hardwired';
+
+export const INLET_MAX_AMPS: Record<PduInletType, number> = {
+  'C14': 16,
+  'C20': 20,
+  'IEC-309-16A': 16,
+  'IEC-309-32A': 32,
+  'Hardwired': 63,
+};
+
+/**
+ * Wire-size & breaker guidance per inlet rating (single-phase 230 V, copper,
+ * clipped-conduit reference — indicative only; verify against local code).
+ */
+export const INLET_WIRE_MM2: Record<PduInletType, string> = {
+  'C14': '2.5 mm² / 16 A',
+  'C20': '2.5 mm² / 20 A',
+  'IEC-309-16A': '2.5 mm² / 16 A',
+  'IEC-309-32A': '4–6 mm² / 32 A',
+  'Hardwired': '10 mm² / 63 A',
+};
+
 export interface PDUConfig {
   id: string;
   side: 'A' | 'B'; // Visual side
@@ -55,6 +78,16 @@ export interface PDUConfig {
   secondarySocketCount?: number;
 
   powerCapacity: number;
+
+  // --- Power input configuration (shared by vertical & horizontal PDUs) -----
+  /** Plug/inlet type that feeds the PDU from the branch circuit. */
+  inletType: PduInletType;
+  supplyVoltage: number;      // V
+  ratedCurrent: number;       // A per phase/line
+  isThreePhase: boolean;
+  /** Number of protected line inputs / internal branch circuits. */
+  circuitCount: number;
+  breakerRatingA: number;     // upstream branch-circuit breaker rating (A)
 
   // --- Rack-mount attributes (side-view placement) --------------------------
   /** vertical = zero-U strip on rear rails; horizontal = rack unit placed via side view. */
@@ -183,6 +216,13 @@ export interface PduType {
   secondarySocketCount?: number;
   /** Same power-rating configuration used for every rack-based PDU. */
   powerCapacity: number;
+  // --- Power input configuration (inlet + supply) ---------------------------
+  inletType: PduInletType;
+  supplyVoltage: number;      // V
+  ratedCurrent: number;       // A per phase/line
+  isThreePhase: boolean;
+  circuitCount: number;       // protected line inputs / branch circuits
+  breakerRatingA: number;     // upstream breaker rating (A)
   /** Physical body height in cm (vertical strips: length along the rail). */
   physicalHeightCm: number;
   /** Physical body depth in cm (drawn to scale in the side view). */
