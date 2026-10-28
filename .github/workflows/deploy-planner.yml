@@ -1,0 +1,66 @@
+name: Deploy RackPlanner to Hostinger
+
+# Ships tony18mo/rackpower-architect to the same Hostinger docroot this repo's
+# deploy.yml already targets, reusing this repo's HOSTINGER_FTP_* secrets.
+# Manual only: a push here must not silently replace the hosted app.
+on:
+  workflow_dispatch:
+    inputs:
+      planner_ref:
+        description: 'Branch of tony18mo/rackpower-architect to deploy'
+        required: false
+        default: 'main'
+      dry_run:
+        description: 'Verify connectivity and file diff without changing the live site'
+        required: false
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+
+concurrency:
+  group: rackplanner-hostinger-docroot
+  cancel-in-progress: false
+
+jobs:
+  planner-deploy:
+    name: 🚚 RackPlanner → Hostinger
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🚚 Get planner code
+        uses: actions/checkout@v4
+        with:
+          repository: tony18mo/rackpower-architect
+          ref: ${{ inputs.planner_ref || 'main' }}
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 📦 Install Dependencies
+        run: npm ci
+
+      - name: 🔍 Typecheck
+        run: npm run typecheck
+
+      - name: 🧪 Run Tests
+        run: npm run test
+
+      - name: 🏗️ Build Project
+        run: npm run build
+
+      - name: 📂 Sync files to Hostinger
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.HOSTINGER_FTP_SERVER }}
+          username: ${{ secrets.HOSTINGER_FTP_USERNAME }}
+          password: ${{ secrets.HOSTINGER_FTP_PASSWORD }}
+          local-dir: ./dist/
+          protocol: ftps
+          dry-run: ${{ inputs.dry_run == 'true' }}
+          # Separate state file so this pipeline never treats the other app's
+          # assets as stale and deletes them.
+          state-name: .github-actions-deploy-rackplanner.json
