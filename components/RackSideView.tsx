@@ -6,10 +6,9 @@ import {
   PlacementResult,
   ManualPlacementMap,
   VerticalPlacementMap,
-  VerticalChannel,
   MountSide,
 } from '../types';
-import { MM_PER_U, DEFAULT_DEVICE_DIM } from '../utils/placement';
+import { DEFAULT_DEVICE_DIM } from '../utils/placement';
 
 /**
  * RackSideView — interactive side (elevation) view of the rack.
@@ -20,10 +19,11 @@ import { MM_PER_U, DEFAULT_DEVICE_DIM } from '../utils/placement';
  *   (front ↔ back mounting rails).
  * - Horizontal rack-mount PDUs are draggable the same way; dropping them on a
  *   rail records a manual placement that overrides the auto-placement engine.
- * - Vertical (zero-U) PDUs hang in the LEFT or RIGHT cable channel at the back
- *   of the rack. Their strip LENGTH equals their configured physical height and
- *   the placement engine guarantees they never overlap and always fit within
- *   the rack height across the two channels.
+ * - Vertical (zero-U) PDUs are intentionally NOT rendered here: they occupy no
+ *   rack units and hang in the rear cable channels, so the side view stays a
+ *   pure space-planning diagram. They appear in the rear elevation and reports.
+ * - Dragging uses a grab offset captured at pointer-down so the component
+ *   follows the cursor exactly (no inversion / jump-to-corner behaviour).
  * - Cabling is colour-coded by feed: blue = Feed A, red = Feed B; solid lines
  *   originate at the device's FRONT PSU outlet, dashed lines at the REAR outlet.
  */
@@ -42,7 +42,6 @@ interface Props {
   onResetPdu: (pduId: string) => void;
   onMoveDevice: (deviceId: string, targetU: number) => void;
   onSetDeviceSide: (deviceId: string, side: MountSide) => void;
-  onSetVerticalChannel: (pduId: string, channel: VerticalChannel, startCmFromFloor?: number) => void;
 }
 
 // ---- Drawing constants ------------------------------------------------------
@@ -71,10 +70,20 @@ const RackSideView: React.FC<Props> = ({
   onResetPdu,
   onMoveDevice,
   onSetDeviceSide,
-  onSetVerticalChannel,
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const [drag, setDrag] = useState<{ id: string; kind: 'device' | 'pdu' } | null>(null);
+  const [drag, setDrag] = useState<{
+    id: string;
+    kind: 'device' | 'pdu';
+    /** Cursor offset inside the grabbed item (px), captured at pointer-down. */
+    grabX: number;
+    grabY: number;
+    /** Item geometry at pointer-down, used to convert cursor → placement. */
+    x0: number;
+    y0: number;
+    w: number;
+    hPx: number;
+  } | null>(null);
   const [hoverU, setHoverU] = useState<number | null>(null);
 
   const depthPx = rackDepthCm * PX_PER_CM;
@@ -105,34 +114,19 @@ const RackSideView: React.FC<Props> = ({
 
   const mountedDevices = devices.filter(d => d.uPosition !== null);
   const horizontalPdus = pdus.filter(p => p.formFactor === 'horizontal');
-  const verticalPdus = pdus.filter(p => p.formFactor !== 'horizontal');
 
   const pduById = useMemo(() => Object.fromEntries(pdus.map(p => [p.id, p])), [pdus]);
   const placedById = useMemo(
     () => Object.fromEntries(placement.placements.filter(p => p.formFactor === 'horizontal').map(p => [p.pduId, p])),
     [placement],
   );
-  const vertPlacedById = useMemo(
-    () => Object.fromEntries(placement.placements.filter(p => p.formFactor === 'vertical').map(p => [p.pduId, p])),
-    [placement],
-  );
 
   // Socket Y lookup for cabling: map (pduId, socketIndex) -> approximate y.
   const socketY = (pduId: string, socketIndex: number): number | null => {
-    const pdu = pduById[pduId];
-    if (!pdu) return null;
-    if (pdu.formFactor === 'vertical') {
-      // Strip hangs in its rear channel over its physical length; sockets run top→bottom.
-      const pl = vertPlacedById[pduId];
-      if (!pl) return null;
-      const n = pdu.socketCount + (pdu.secondarySocketCount || 0);
-      const frac = n > 1 ? socketIndex / (n - 1) : 0.5;
-      const topY = cmToY(pl.endMm / 10);
-      const botY = cmToY(pl.startMm / 10);
-      return topY + frac * (botY - topY);
-    }
     const pl = placedById[pduId];
     if (!pl) return null;
+    const pdu = pduById[pduId];
+    if (!pdu || pdu.formFactor === 'vertical') return null; // vertical PDUs not drawn here
     const bodyTopY = uTopY(pl.uPosition) + 1;
     const bodyH = Math.max(U_HEIGHT_PX * pl.uSpan - 2, 8);
     const n = Math.max(1, pdu.socketCount + (pdu.secondarySocketCount || 0));
@@ -140,58 +134,49 @@ const RackSideView: React.FC<Props> = ({
     return bodyTopY + frac * (bodyH - 4) + 2;
   };
 
-  // X position of a vertical PDU strip inside its assigned rear channel.
-  const vertStripX = (channel: VerticalChannel, ordinalInChannel: number): number => {
-    const w = 7; // strip visual width in px
-    const gap = 3;
-    // View shows FRONT (left) → BACK (right). The "left" channel of the rack
-    // (looking from the front) appears nearer the front rail in this projection.
-    if (channel === 'left') return xFrontRail + RAIL_W + 6 + ordinalInChannel * (w + gap);
-    return xBackRail - w - 6 - ordinalInChannel * (w + gap);
-  };
-
-  const channelOrdinal = (pduId: string, channel: VerticalChannel): number => {
-    const ids = placement.placements
-      .filter(p => p.formFactor === 'vertical' && p.channel === channel)
-      .map(p => p.pduId);
-    const idx = ids.indexOf(pduId);
-    return idx < 0 ? 0 : idx;
+  /** Convert a client (mouse) point into SVG user-space coordinates. */
+  const clientToSvg = (clientX: number, clientY: number) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: ((clientX - rect.left) / rect.width) * totalW,
+      y: ((clientY - rect.top) / rect.height) * totalH,
+    };
   };
 
   // ---- Drag handlers ---------------------------------------------------------
-  const startDrag = (id: string, kind: 'device' | 'pdu') => (e: React.PointerEvent) => {
-    e.preventDefault();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
-    setDrag({ id, kind });
-  };
+  // Grab offset is captured at pointer-down so the item follows the cursor
+  // exactly — this fixes the previous "inverted drag" where items jumped so
+  // their top-left corner landed on the cursor and moved opposite to intent.
+  const startDrag = (geom: { id: string; kind: 'device' | 'pdu'; x: number; y: number; w: number; hPx: number }) =>
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      const p = clientToSvg(e.clientX, e.clientY);
+      if (!p) return;
+      setDrag({ ...geom, grabX: p.x - geom.x, grabY: p.y - geom.y });
+    };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!drag) return;
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const yPx = ((e.clientY - rect.top) / rect.height) * totalH;
-    const xTotal = ((e.clientX - rect.left) / rect.width) * totalW;
+    const p = clientToSvg(e.clientX, e.clientY);
+    if (!p) return;
 
-    // Vertical PDU strip → drag selects rear channel (left/right of rack centre)
-    // and its top position along the rail (startCmFromFloor).
-    if (drag.kind === 'pdu' && pduById[drag.id]?.formFactor === 'vertical') {
-      const ch: VerticalChannel = xTotal < MARGIN_X + innerW / 2 ? 'left' : 'right';
-      const pl = vertPlacedById[drag.id];
-      const lenCm = pl ? (pl.endMm - pl.startMm) / 10 : (pduById[drag.id].physicalHeightCm || 18);
-      const rackTopCm = rackSizeU * MM_PER_U / 10;
-      const centerCm = yToCm(yPx);
-      const startCm = clamp(centerCm + lenCm / 2, lenCm, rackTopCm);
-      const cur = verticalPlacements[drag.id];
-      if (!cur || cur.channel !== ch || Math.abs((cur.startCmFromFloor ?? -1) - startCm) > 0.5) {
-        onSetVerticalChannel(drag.id, ch, startCm);
-      }
-      setHoverU(clamp(Math.floor((yPx - MARGIN_TOP) / U_HEIGHT_PX) + 1, 1, rackSizeU));
-      return;
-    }
+    // New top-left of the dragged rectangle (cursor minus grab offset).
+    const newX = p.x - drag.grabX;
+    const newY = p.y - drag.grabY;
 
-    const u = uAtClientY(e.clientY);
+    // Horizontal rail choice from the item's CENTRE (not the cursor), so
+    // dragging feels natural near the midline.
+    const centerX = newX + drag.w / 2;
+    const side: MountSide = centerX < MARGIN_X + innerW / 2 ? 'front' : 'back';
+
+    // Vertical placement: align the item's TOP edge to a U slot. Using the top
+    // edge keeps multi-U items from being off-by-one when grabbed mid-body.
+    const u = clamp(Math.round((newY - MARGIN_TOP) / U_HEIGHT_PX) + 1, 1, rackSizeU);
     setHoverU(u);
-    const side: MountSide = xTotal < MARGIN_X + innerW / 2 ? 'front' : 'back';
+
     if (drag.kind === 'device') {
       onMoveDevice(drag.id, u);
       onSetDeviceSide(drag.id, side);
@@ -213,7 +198,7 @@ const RackSideView: React.FC<Props> = ({
     const selected = drag?.id === d.id;
     return (
       <g key={d.id} style={{ cursor: 'grab' }}
-         onPointerDown={startDrag(d.id, 'device')}
+         onPointerDown={startDrag({ id: d.id, kind: 'device', x, y, w, hPx: h })}
          onPointerMove={handlePointerMove}
          onPointerUp={endDrag}
          onPointerCancel={endDrag}>
@@ -236,15 +221,17 @@ const RackSideView: React.FC<Props> = ({
     const pl = placedById[pdu.id];
     if (!pl) {
       // Unplaced horizontal PDU → parked in tray below the rack (still draggable up).
+      const px = xFrontRail + RAIL_W + 4;
+      const py = MARGIN_TOP + rackH + 6;
       return (
-        <g key={pdu.id} transform={`translate(${xFrontRail + RAIL_W + 4}, ${MARGIN_TOP + rackH + 6})`}
+        <g key={pdu.id}
            style={{ cursor: 'grab' }}
-           onPointerDown={startDrag(pdu.id, 'pdu')}
+           onPointerDown={startDrag({ id: pdu.id, kind: 'pdu', x: px, y: py, w: 60, hPx: 12 })}
            onPointerMove={handlePointerMove}
            onPointerUp={endDrag}>
           <title>{`${pdu.id}: unplaced — drag into the rack`}</title>
-          <rect width={60} height={12} rx={2} fill="none" stroke="#94a3b8" strokeDasharray="3 2" />
-          <text x={30} y={9} textAnchor="middle" fontSize={8} fill="#94a3b8">{pdu.id} ⚠</text>
+          <rect x={px} y={py} width={60} height={12} rx={2} fill="none" stroke="#94a3b8" strokeDasharray="3 2" />
+          <text x={px + 30} y={py + 9} textAnchor="middle" fontSize={8} fill="#94a3b8">{pdu.id} ⚠</text>
         </g>
       );
     }
@@ -256,63 +243,25 @@ const RackSideView: React.FC<Props> = ({
     const y = uTopY(pl.uPosition) + 1;
     const x = pl.mountSide === 'front' ? xFrontRail + RAIL_W : xBackRail - w;
     const selected = drag?.id === pdu.id;
+    const inletLabel = pdu.inletType === 'Hardwired' ? 'HW' : pdu.inletType.replace('IEC-309-', '');
     return (
       <g key={pdu.id} style={{ cursor: 'grab' }}
-         onPointerDown={startDrag(pdu.id, 'pdu')}
+         onPointerDown={startDrag({ id: pdu.id, kind: 'pdu', x, y, w, hPx: h })}
          onPointerMove={handlePointerMove}
          onPointerUp={endDrag}
          onDoubleClick={() => onResetPdu(pdu.id)}>
-        <title>{`${pdu.id} (${pdu.side === 'A' ? 'Feed A' : 'Feed B'}) · ${isManual ? 'manual' : 'auto'} @ U${pl.uPosition - pl.uSpan + 1}–${pl.uPosition} · ${pl.mountSide} · depth ${depthCm.toFixed(1)} cm · dbl-click to auto`}</title>
+        <title>{`${pdu.id} (${pdu.side === 'A' ? 'Feed A' : 'Feed B'}) · ${isManual ? 'manual' : 'auto'} @ U${pl.uPosition - pl.uSpan + 1}–${pl.uPosition} · ${pl.mountSide} · depth ${depthCm.toFixed(1)} cm · inlet ${pdu.inletType} · ${pdu.isThreePhase ? '3φ' : '1φ'} ${pdu.supplyVoltage}V ${pdu.ratedCurrent}A (${pdu.circuitCount}×${pdu.breakerRatingA}A) · dbl-click to auto`}</title>
         <rect x={x} y={y} width={w} height={h} rx={2}
               fill={selected ? '#fde68a' : color} opacity={isManual ? 1 : 0.85}
               stroke={isManual ? '#0f172a' : color} strokeWidth={isManual ? 1.6 : 1} />
+        {/* inlet marker at the cable-entry end of the body */}
+        <rect x={pl.mountSide === 'front' ? x + w - 5 : x + 1} y={y + h / 2 - 3} width={4} height={6} rx={1}
+              fill="#ffffff" stroke={color} strokeWidth={0.8} />
         {/* sockets row */}
-        {Array.from({ length: Math.min(pdu.socketCount, Math.floor(w / 7)) }).map((_, i) => (
-          <rect key={i} x={x + 3 + i * 7} y={y + h / 2 - 2} width={4} height={4} rx={1} fill="#ffffff" opacity={0.9} />
+        {Array.from({ length: Math.min(pdu.socketCount, Math.floor((w - 8) / 7)) }).map((_, i) => (
+          <rect key={i} x={x + 6 + i * 7} y={y + h / 2 - 2} width={4} height={4} rx={1} fill="#ffffff" opacity={0.9} />
         ))}
-        <text x={x + w / 2} y={y - 2} textAnchor="middle" fontSize={8} fontWeight={700} fill={color}>{pdu.id}{isManual ? '*' : ''}</text>
-      </g>
-    );
-  };
-
-  const renderVerticalPdu = (pdu: PDUConfig) => {
-    const pl = vertPlacedById[pdu.id];
-    const color = pdu.side === 'A' ? FEED_A_COLOR : FEED_B_COLOR;
-    const manual = verticalPlacements[pdu.id];
-    if (!pl) {
-      // Could not fit in either rear channel — show as a parked chip.
-      return (
-        <g key={pdu.id} transform={`translate(${xBackRail + RAIL_W + 10}, ${MARGIN_TOP + rackH + 6})`}>
-          <title>{`${pdu.id}: does not fit in the rear channels — reduce quantity or increase rack height`}</title>
-          <rect width={54} height={12} rx={2} fill="none" stroke={color} strokeDasharray="3 2" />
-          <text x={27} y={9} textAnchor="middle" fontSize={8} fill={color}>{pdu.id} ⚠</text>
-        </g>
-      );
-    }
-    const ch = pl.channel ?? 'right';
-    const x = vertStripX(ch, channelOrdinal(pdu.id, ch));
-    const w = 7;
-    const topY = cmToY(pl.endMm / 10);
-    const botY = cmToY(pl.startMm / 10);
-    const h = Math.max(botY - topY, 4);
-    const selected = drag?.id === pdu.id;
-    const lenCm = (pl.endMm - pl.startMm) / 10;
-    return (
-      <g key={pdu.id} style={{ cursor: 'grab' }}
-         onPointerDown={startDrag(pdu.id, 'pdu')}
-         onPointerMove={handlePointerMove}
-         onPointerUp={endDrag}
-         onPointerCancel={endDrag}
-         onDoubleClick={() => onResetPdu(pdu.id)}>
-        <title>{`${pdu.id} vertical zero-U PDU · Feed ${pdu.side} · ${ch} rear channel · length ${lenCm.toFixed(0)} cm (${Math.round(lenCm / MM_PER_U * 10) / 10}U)${manual ? ' · manual, dbl-click to auto' : ''}`}</title>
-        <rect x={x} y={topY} width={w} height={h} rx={2}
-              fill={selected ? '#fde68a' : color} opacity={selected ? 0.95 : 0.75}
-              stroke={manual ? '#0f172a' : color} strokeWidth={manual ? 1.4 : 0.8} />
-        {/* socket ticks along the strip */}
-        {Array.from({ length: Math.min(pdu.socketCount, Math.max(2, Math.floor(h / 6))) }).map((_, i, arr) => (
-          <circle key={i} cx={x + w / 2} cy={topY + ((i + 0.5) / arr.length) * h} r={1.2} fill="#ffffff" opacity={0.9} />
-        ))}
-        <text x={x + w / 2} y={topY - 3} textAnchor="middle" fontSize={7.5} fontWeight={700} fill={color}>{pdu.id}{manual ? '*' : ''}</text>
+        <text x={x + w / 2} y={y - 2} textAnchor="middle" fontSize={8} fontWeight={700} fill={color}>{pdu.id}{isManual ? '*' : ''} · {inletLabel}</text>
       </g>
     );
   };
@@ -327,25 +276,17 @@ const RackSideView: React.FC<Props> = ({
       if (sy === null) return;
       const pl = placedById[conn.pduId];
       const pdu = pduById[conn.pduId];
-      if (!pdu) return;
+      if (!pdu || !pl) return;
       const color = pdu.side === 'A' ? FEED_A_COLOR : FEED_B_COLOR;
       const dim = deviceDims[d.name] || defaultDeviceDim;
       const depthCm = clamp(dim.depth > 0 ? dim.depth : 65, 2, rackDepthCm - 2);
       const w = depthCm * PX_PER_CM;
-      const dx = d.uPosition ? (d.mountSide === 'front' ? xFrontRail + RAIL_W : xBackRail) : 0;
       const outletX = d.mountSide === 'front'
         ? (psuIdx === 0 ? xFrontRail + RAIL_W + 2 : xFrontRail + RAIL_W + w - 2)
         : (psuIdx === 0 ? xBackRail - w + 2 : xBackRail - 2);
       const dy = uTopY(d.uPosition!) + Math.max(d.uHeight * U_HEIGHT_PX - 2, 6) / 2 + 1;
-      let ex: number;
-      if (pdu.formFactor === 'vertical') {
-        const vpl = vertPlacedById[pdu.id];
-        if (!vpl) return;
-        ex = vertStripX(vpl.channel ?? 'right', channelOrdinal(pdu.id, vpl.channel ?? 'right')) + 3.5;
-      } else if (pl) {
-        const pdw = clamp(pl.depthCm > 0 ? pl.depthCm : 7.5, 1.5, rackDepthCm - 2) * PX_PER_CM;
-        ex = pl.mountSide === 'front' ? xFrontRail + RAIL_W + pdw - 2 : xBackRail - pdw + 2;
-      } else return;
+      const pdw = clamp(pl.depthCm > 0 ? pl.depthCm : 7.5, 1.5, rackDepthCm - 2) * PX_PER_CM;
+      const ex = pl.mountSide === 'front' ? xFrontRail + RAIL_W + pdw - 2 : xBackRail - pdw + 2;
       const midY = (dy + sy) / 2;
       cables.push(
         <path key={`${d.id}-${psuIdx}`}
@@ -354,7 +295,6 @@ const RackSideView: React.FC<Props> = ({
               strokeDasharray={psuIdx === 0 ? undefined : '4 3'}
               opacity={0.75} pointerEvents="none" />
       );
-      void dx;
     });
   });
 
@@ -393,18 +333,8 @@ const RackSideView: React.FC<Props> = ({
               fill="#fbbf24" opacity={0.25} pointerEvents="none" />
       )}
 
-      {/* Rear zero-U cable channel guides (left & right of rack centre) */}
-      <g pointerEvents="none">
-        <rect x={xFrontRail + RAIL_W + 3} y={uTopY(rackSizeU)} width={26} height={rackH} fill="#0ea5e9" opacity={0.06} />
-        <rect x={xBackRail - 29} y={uTopY(rackSizeU)} width={26} height={rackH} fill="#0ea5e9" opacity={0.06} />
-        <text x={xFrontRail + RAIL_W + 16} y={MARGIN_TOP - 4} textAnchor="middle" fontSize={7} fill="#0369a1">L channel</text>
-        <text x={xBackRail - 16} y={MARGIN_TOP - 4} textAnchor="middle" fontSize={7} fill="#0369a1">R channel</text>
-      </g>
-
-      {/* Vertical PDUs (behind devices) */}
-      {verticalPdus.map(renderVerticalPdu)}
-
-      {/* Devices & horizontal PDUs */}
+      {/* Devices & horizontal PDUs (vertical 0U PDUs are not space-planned here —
+          they hang in the rear cable channels; see rear elevation & reports) */}
       {mountedDevices.map(renderDevice)}
       {horizontalPdus.map(renderHorizontalPdu)}
 
@@ -419,8 +349,8 @@ const RackSideView: React.FC<Props> = ({
         <text x={190} y={3}>Feed B (dashed = PSU2/rear outlet)</text>
         <rect x={350} y={-5} width={10} height={10} fill="#cbd5e1" stroke="#64748b" />
         <text x={364} y={3}>Device (width = depth)</text>
-        <rect x={470} y={-5} width={5} height={10} fill="#2563eb" opacity={0.75} />
-        <text x={479} y={3}>Vertical PDU in rear L/R channel — drag to move, dbl-click to auto</text>
+        <rect x={470} y={-5} width={10} height={10} fill="#2563eb" opacity={0.85} stroke="#0f172a" strokeDasharray="2 1" />
+        <text x={484} y={3}>Horizontal PDU (* = manual, dbl-click to auto). Vertical 0U PDUs live in the rear L/R channels — shown in rear view &amp; reports.</text>
       </g>
     </svg>
   );
