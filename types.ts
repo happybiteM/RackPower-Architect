@@ -225,8 +225,14 @@ export interface PduType {
   breakerRatingA: number;     // upstream breaker rating (A)
   /** Physical body height in cm (vertical strips: length along the rail). */
   physicalHeightCm: number;
+  /** Physical body width in cm (horizontal PDUs — faceplate width). */
+  physicalWidthCm: number;
   /** Physical body depth in cm (drawn to scale in the side view). */
   physicalDepthCm: number;
+  /** Socket column layout on the PDU face (1 = single column, 2 = wide). */
+  cols: number;
+  /** Default mounting rail for horizontal PDUs of this type. */
+  mountSide: MountSide;
   /** How many PDUs of this type are available (quantity selector). */
   quantity: number;
 }

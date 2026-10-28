@@ -42,30 +42,20 @@ const Dashboard: React.FC = () => {
   const [rackSize, setRackSize] = useState(48);
   const [tempRackSize, setTempRackSize] = useState<number | string>(48);
 
-  const [baseSocketsPerPDU, setBaseSocketsPerPDU] = useState(20);
-  const [tempSockets, setTempSockets] = useState<number | string>(20); 
-
-  const [secondarySocketsPerPDU, setSecondarySocketsPerPDU] = useState(4);
-  const [tempSecondarySockets, setTempSecondarySockets] = useState<number | string>(4);
-
   const [manualPduPairs, setManualPduPairs] = useState<number | null>(null);
-  const [pduCols, setPduCols] = useState<number>(1); // New State for PDU Columns
 
-  const [pduPhysicalHeight, setPduPhysicalHeight] = useState<number>(180); // cm
-  const [pduPhysicalWidth, setPduPhysicalWidth] = useState<number>(5.5); // cm
+  // NOTE: PDU electrical parameters (sockets, capacity, inlet/supply, breaker,
+  // dimensions, columns, form factor, mount rail) live in the PDU Library
+  // section of Global Config — it is the single source of truth that both
+  // diagrams draw from.
   const [pduCordLength, setPduCordLength] = useState<number>(3); // meters
 
-  // Rack-mount PDU placement configuration
+  // Rack & placement configuration
   const [rackPreset, setRackPreset] = useState<string>('48U');
   const [rackDepth, setRackDepth] = useState<number>(120); // cm (external)
-  const [pduVertSpaceU, setPduVertSpaceU] = useState<number>(0); // 0 = auto
-  const [pduInletType, setPduInletType] = useState<keyof typeof CORD_BEND_CM>('C14');
   const [placementStrategy, setPlacementStrategy] = useState<PduPlacementStrategy>('bottom');
   const [deviceDims, setDeviceDims] = useState<Record<string, PhysicalDimensions>>({});
-  // Horizontal vs vertical rack PDUs + side-view manual placements
-  const [pduFormFactor, setPduFormFactor] = useState<PduFormFactor>('vertical');
-  const [pduMountSide, setPduMountSide] = useState<MountSide>('back');   // default mounting rail for horizontal PDUs
-  const [pduHorizontalDepthCm, setPduHorizontalDepthCm] = useState<number>(7.5); // PDU body depth (side view)
+  // Side-view manual placements
   const [manualPlacements, setManualPlacements] = useState<ManualPlacementMap>({});
   const [verticalPlacements, setVerticalPlacements] = useState<VerticalPlacementMap>({});
 
@@ -78,23 +68,19 @@ const Dashboard: React.FC = () => {
       socketType: 'C13', socketCount: 20, secondarySocketType: 'C19', secondarySocketCount: 4,
       powerCapacity: 7360, inletType: 'IEC-309-32A', supplyVoltage: 230, ratedCurrent: 32,
       isThreePhase: false, circuitCount: 2, breakerRatingA: 16,
-      physicalHeightCm: 183, physicalDepthCm: 5.6, quantity: 2,
+      physicalHeightCm: 183, physicalWidthCm: 5.6, physicalDepthCm: 5.6, cols: 1, mountSide: 'back', quantity: 2,
     },
     {
       id: 'horiz1U', name: 'Horizontal 1U · C13 x8', formFactor: 'horizontal',
       socketType: 'C13', socketCount: 8, secondarySocketType: undefined, secondarySocketCount: 0,
       powerCapacity: 7360, inletType: 'C20', supplyVoltage: 230, ratedCurrent: 20,
       isThreePhase: false, circuitCount: 2, breakerRatingA: 16,
-      physicalHeightCm: 4.4, physicalDepthCm: 7.5, quantity: 0,
+      physicalHeightCm: 4.4, physicalWidthCm: 48.3, physicalDepthCm: 7.5, cols: 1, mountSide: 'back', quantity: 0,
     },
   ]));
 
-  const [basePduCapacity, setBasePduCapacity] = useState(7360);
   const [safetyMargin, setSafetyMargin] = useState(80);
   const [powerFactor, setPowerFactor] = useState(0.95);
-
-  const [socketType, setSocketType] = useState<SocketType>('C13');
-  const [secondarySocketType, setSecondarySocketType] = useState<SocketType>('C19');
   
   // Group Editing State
   const [editGroupModalOpen, setEditGroupModalOpen] = useState(false);
@@ -121,28 +107,49 @@ const Dashboard: React.FC = () => {
   const configInputRef = useRef<HTMLInputElement>(null);
   const visualizerRef = useRef<HTMLDivElement>(null);
 
-  // --- Derived PDU Specs based on Capacity/Type ---
+  // --- Derived PDU Specs: single source of truth = the PDU library (merged
+  // into Global Config). Both diagrams (front RackVisualizer & side view) and
+  // all electrical math draw from these per-type parameters. The "reference"
+  // type is the first vertical type, else the first type in the library.
+  const refPduType = useMemo<PduType | undefined>(() =>
+    pduLibrary.find(t => t.formFactor === 'vertical' && t.quantity > 0)
+      ?? pduLibrary.find(t => t.quantity > 0)
+      ?? pduLibrary[0],
+  [pduLibrary]);
+
   const pduSpecs = useMemo(() => {
-    switch (basePduCapacity) {
-        case 3680: // Standard 16A (3.6kW)
-            return { voltage: 230, circuits: 1, amps: 16, isThreePhase: false };
-        case 7360: // Standard 32A (7.3kW)
-            // Typically 2x 16A breakers
-            return { voltage: 230, circuits: 2, amps: 16, isThreePhase: false };
-        case 14400: // High Density 63A (14.4kW)
-            // Typically 4x 16A breakers
-            return { voltage: 230, circuits: 4, amps: 16, isThreePhase: false };
-        case 11000: // 3-Phase 16A (11kW)
-            // 3x 16A Phases
-            return { voltage: 230, circuits: 3, amps: 16, isThreePhase: true };
-        case 22000: // 3-Phase 32A (22kW)
-            // 6x 16A Breakers (2 per phase)
-            return { voltage: 230, circuits: 6, amps: 16, isThreePhase: true };
-        default:
-            // Custom or Unknown fallback
-            return { voltage: 230, circuits: 1, amps: 32, isThreePhase: false };
+    if (refPduType) {
+      return {
+        voltage: refPduType.supplyVoltage,
+        circuits: refPduType.circuitCount,
+        amps: refPduType.breakerRatingA,
+        isThreePhase: refPduType.isThreePhase,
+      };
     }
-  }, [basePduCapacity]);
+    return { voltage: 230, circuits: 1, amps: 32, isThreePhase: false };
+  }, [refPduType]);
+
+  // Primary/secondary socket counts & types now come from the reference PDU type.
+  const baseSocketsPerPDU = refPduType?.socketCount ?? 8;
+  const secondarySocketsPerPDU = refPduType?.secondarySocketCount ?? 0;
+  const socketTypeDerived: SocketType = refPduType?.socketType ?? 'C13';
+  const secondarySocketTypeDerived: SocketType = refPduType?.secondarySocketType ?? 'C19';
+
+  // Per-type power capacity is the single source of truth; fall back to the
+  // legacy PDU_VARIANTS default when no type is defined yet.
+  const basePduCapacity = refPduType?.powerCapacity ?? 7360;
+
+  // Placement inputs derived from the library (both diagrams consume these):
+  const pduVertSpaceU = 0;                                   // always auto from per-PDU physical height
+  const pduInletClearanceKey: keyof typeof CORD_BEND_CM =
+    refPduType && (refPduType.inletType === 'C14' || refPduType.inletType === 'C20')
+      ? refPduType.inletType : 'C14';
+  const pduPhysicalHeightCm = refPduType?.physicalHeightCm ?? 18;   // cm — body height/strip length
+  const pduPhysicalWidthCm = refPduType?.physicalWidthCm ?? 5.5;    // cm — faceplate width
+  const pduCols = refPduType?.cols ?? 1;                            // socket columns on face
+  const horizontalDepthCm =
+    pduLibrary.find(t => t.formFactor === 'horizontal' && t.quantity > 0)?.physicalDepthCm
+    ?? refPduType?.physicalDepthCm ?? 7.5;
 
   // --- Logic to Calculate Required PDUs ---
   
@@ -187,7 +194,10 @@ const Dashboard: React.FC = () => {
     circuitCount: pduSpecs.circuits,
     breakerRatingA: 16,
     physicalHeightCm: 183,
+    physicalWidthCm: 5.6,
     physicalDepthCm: 5.6,
+    cols: 1,
+    mountSide: 'back',
     quantity: 1,
   });
 
@@ -222,7 +232,7 @@ const Dashboard: React.FC = () => {
           socketCount: Math.max(1, t.socketCount),
           secondarySocketType: t.secondarySocketType,
           secondarySocketCount: t.secondarySocketCount ?? 0,
-          powerCapacity: basePduCapacity,   // same power rating config for vertical & horizontal PDUs
+          powerCapacity: t.powerCapacity,   // per-type power rating config
           inletType: t.inletType,
           supplyVoltage: t.supplyVoltage,
           ratedCurrent: t.ratedCurrent,
@@ -232,88 +242,58 @@ const Dashboard: React.FC = () => {
           formFactor: t.formFactor,
           physicalHeightCm: t.physicalHeightCm,
           physicalDepthCm: t.physicalDepthCm,
-          mountSide: t.formFactor === 'horizontal' ? pduMountSide : 'back',
+          mountSide: t.formFactor === 'horizontal' ? t.mountSide : 'back',
           uPosition: null,
         });
       }
     }
     return list;
-  }, [pduLibrary, basePduCapacity, pduMountSide]);
+  }, [pduLibrary]);
 
   const pduAvailablePairs = Math.min(
     pduInstances.filter(p => p.side === 'A').length,
     pduInstances.filter(p => p.side === 'B').length,
   );
 
-  // Effective PDU list: library instances when defined; legacy global-config
-  // synthesis otherwise. When the library cannot cover the required pairs, pad
-  // with copies of the last-defined type so wiring math stays consistent.
+  // Effective PDU list comes ONLY from the PDU library section of Global
+  // Config — both diagrams draw their data from it. When the library cannot
+  // cover the required A/B pairs, pad with copies of the last-defined type so
+  // wiring math stays consistent.
   const pdus: PDUConfig[] = useMemo(() => {
-    if (pduInstances.length > 0) {
-      const neededPairs = Math.max(activePduPairs, 1);
-      if (pduAvailablePairs >= neededPairs) return pduInstances;
-      const out = [...pduInstances];
-      let aCount = out.filter(p => p.side === 'A').length;
-      let bCount = out.filter(p => p.side === 'B').length;
-      const template = pduLibrary[pduLibrary.length - 1];
-      while (Math.min(aCount, bCount) < neededPairs && template) {
-        const growA = aCount <= bCount;
-        const idx = growA ? ++aCount : ++bCount;
-        out.push({
-          id: `${growA ? 'A' : 'B'}${idx}`,
-          side: growA ? 'A' : 'B',
-          index: idx - 1,
-          socketType: template.socketType,
-          socketCount: Math.max(1, template.socketCount),
-          secondarySocketType: template.secondarySocketType,
-          secondarySocketCount: template.secondarySocketCount ?? 0,
-          powerCapacity: basePduCapacity,
-          inletType: template.inletType,
-          supplyVoltage: template.supplyVoltage,
-          ratedCurrent: template.ratedCurrent,
-          isThreePhase: template.isThreePhase,
-          circuitCount: template.circuitCount,
-          breakerRatingA: template.breakerRatingA,
-          formFactor: template.formFactor,
-          physicalHeightCm: template.physicalHeightCm,
-          physicalDepthCm: template.physicalDepthCm,
-          mountSide: template.formFactor === 'horizontal' ? pduMountSide : 'back',
-          uPosition: null,
-        });
-      }
-      return out;
+    const neededPairs = Math.max(activePduPairs, 1);
+    if (pduInstances.length === 0) return [];
+    if (pduAvailablePairs >= neededPairs) return pduInstances;
+    const out = [...pduInstances];
+    let aCount = out.filter(p => p.side === 'A').length;
+    let bCount = out.filter(p => p.side === 'B').length;
+    const template = pduLibrary[pduLibrary.length - 1];
+    while (template && Math.min(aCount, bCount) < neededPairs) {
+      const growA = aCount <= bCount;
+      const idx = growA ? ++aCount : ++bCount;
+      out.push({
+        id: `${growA ? 'A' : 'B'}${idx}`,
+        side: growA ? 'A' : 'B',
+        index: idx - 1,
+        socketType: template.socketType,
+        socketCount: Math.max(1, template.socketCount),
+        secondarySocketType: template.secondarySocketType,
+        secondarySocketCount: template.secondarySocketCount ?? 0,
+        powerCapacity: template.powerCapacity,
+        inletType: template.inletType,
+        supplyVoltage: template.supplyVoltage,
+        ratedCurrent: template.ratedCurrent,
+        isThreePhase: template.isThreePhase,
+        circuitCount: template.circuitCount,
+        breakerRatingA: template.breakerRatingA,
+        formFactor: template.formFactor,
+        physicalHeightCm: template.physicalHeightCm,
+        physicalDepthCm: template.physicalDepthCm,
+        mountSide: template.formFactor === 'horizontal' ? template.mountSide : 'back',
+        uPosition: null,
+      });
     }
-
-    const list: PDUConfig[] = [];
-    for (let i = 0; i < activePduPairs; i++) {
-        const shared = {
-            socketType: socketType,
-            socketCount: baseSocketsPerPDU,
-            secondarySocketType: secondarySocketType,
-            secondarySocketCount: secondarySocketsPerPDU,
-            powerCapacity: basePduCapacity,   // same power rating config for vertical & horizontal PDUs
-            inletType: pduInletType === 'C14' || pduInletType === 'C20' ? pduInletType : (pduSpecs.amps >= 32 ? 'IEC-309-32A' as const : 'IEC-309-16A' as const),
-            supplyVoltage: pduSpecs.voltage,
-            ratedCurrent: pduSpecs.isThreePhase ? pduSpecs.amps : pduSpecs.amps * pduSpecs.circuits,
-            isThreePhase: pduSpecs.isThreePhase,
-            circuitCount: pduSpecs.circuits,
-            breakerRatingA: pduSpecs.amps,
-            formFactor: pduFormFactor,
-            physicalHeightCm: pduPhysicalHeight / 10,
-            physicalDepthCm: pduHorizontalDepthCm,
-        };
-        const mk = (side: 'A' | 'B'): PDUConfig => ({
-            id: `${side}${i + 1}`,
-            side,
-            index: i,
-            ...shared,
-            mountSide: shared.formFactor === 'horizontal' ? pduMountSide : 'back',
-            uPosition: null,
-        });
-        list.push(mk('A'), mk('B'));
-    }
-    return list;
-  }, [activePduPairs, pduInstances, pduAvailablePairs, pduLibrary, baseSocketsPerPDU, secondarySocketsPerPDU, basePduCapacity, socketType, secondarySocketType, pduFormFactor, pduMountSide, pduPhysicalHeight, pduHorizontalDepthCm]);
+    return out;
+  }, [activePduPairs, pduInstances, pduAvailablePairs, pduLibrary]);
 
   // Helper: Get geometric Y position of a socket on a PDU
   // Used to find closest socket to device
