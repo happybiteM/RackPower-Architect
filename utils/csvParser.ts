@@ -161,7 +161,7 @@ export const parseCSV = (csvText: string): RackGroup[] => {
              conns[p] = null;
         }
 
-        return { ...d, uPosition: pos, psuConnections: conns };
+        return { ...d, mountSide: "front", uPosition: pos, psuConnections: conns };
       }
       
       // Device doesn't fit in rack
