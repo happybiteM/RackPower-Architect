@@ -86,8 +86,11 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
   const horizontalPdus = pdus.filter(p => p.formFactor === 'horizontal');
   const verticalPdus = pdus.filter(p => p.formFactor !== 'horizontal');
 
-  /** Resolve the U span for a specific horizontal PDU. */
+  /** Resolve the U span for a specific horizontal PDU. Rack-based PDUs are
+   *  sized directly in U (their configured `uHeight`); cm heights apply only to
+   *  vertical strips. Falls back to legacy auto-derivation when uHeight is 0. */
   const spanForPdu = (pdu: PDUConfig): number => {
+    if (pdu.uHeight > 0) return Math.max(1, Math.round(pdu.uHeight));
     if (pduVertSpaceU > 0) return Math.max(1, Math.round(pduVertSpaceU));
     const hcm = pdu.physicalHeightCm > 0 ? pdu.physicalHeightCm : defaultPduHcm;
     return pduRequiredU(hcm, pduInletType);
@@ -97,7 +100,9 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
     const startU = anchor - spanU + 1;
     const startMm = offsetMm + (startU - 1) * uHeightMm;
     const endMm = startMm + spanU * uHeightMm;
-    const bodyMm = (pdu.physicalHeightCm > 0 ? pdu.physicalHeightCm : defaultPduHcm) * 10;
+    // Horizontal PDU body height is defined in U — clearance is whatever the
+    // allocated U span leaves beyond the inlet cord bend.
+    const bodyMm = Math.max(0, spanU * uHeightMm - CORD_BEND_CM[pduInletType] * 10);
     return {
       pduId: pdu.id,
       side: pdu.side,

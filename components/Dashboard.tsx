@@ -68,14 +68,14 @@ const Dashboard: React.FC = () => {
       socketType: 'C13', socketCount: 20, secondarySocketType: 'C19', secondarySocketCount: 4,
       powerCapacity: 7360, inletType: 'IEC-309-32A', supplyVoltage: 230, ratedCurrent: 32,
       isThreePhase: false, circuitCount: 2, breakerRatingA: 16,
-      physicalHeightCm: 183, physicalWidthCm: 5.6, physicalDepthCm: 5.6, cols: 1, mountSide: 'back', quantity: 2,
+      physicalHeightCm: 183, uHeight: 0, physicalWidthCm: 5.6, physicalDepthCm: 5.6, cols: 1, mountSide: 'back', quantity: 2,
     },
     {
       id: 'horiz1U', name: 'Horizontal 1U · C13 x8', formFactor: 'horizontal',
       socketType: 'C13', socketCount: 8, secondarySocketType: undefined, secondarySocketCount: 0,
       powerCapacity: 7360, inletType: 'C20', supplyVoltage: 230, ratedCurrent: 20,
       isThreePhase: false, circuitCount: 2, breakerRatingA: 16,
-      physicalHeightCm: 4.4, physicalWidthCm: 48.3, physicalDepthCm: 7.5, cols: 1, mountSide: 'back', quantity: 0,
+      physicalHeightCm: 0, uHeight: 1, physicalWidthCm: 48.3, physicalDepthCm: 7.5, cols: 1, mountSide: 'back', quantity: 0,
     },
   ]));
 
@@ -193,6 +193,7 @@ const Dashboard: React.FC = () => {
     circuitCount: pduSpecs.circuits,
     breakerRatingA: 16,
     physicalHeightCm: 183,
+    uHeight: 1,
     physicalWidthCm: 5.6,
     physicalDepthCm: 5.6,
     cols: 1,
@@ -239,7 +240,8 @@ const Dashboard: React.FC = () => {
           circuitCount: t.circuitCount,
           breakerRatingA: t.breakerRatingA,
           formFactor: t.formFactor,
-          physicalHeightCm: t.physicalHeightCm,
+          physicalHeightCm: t.formFactor === 'vertical' ? t.physicalHeightCm : 0,
+          uHeight: t.formFactor === 'horizontal' ? Math.max(1, Math.round(t.uHeight || 1)) : 0,
           physicalDepthCm: t.physicalDepthCm,
           mountSide: t.formFactor === 'horizontal' ? t.mountSide : 'back',
           uPosition: null,
@@ -285,7 +287,8 @@ const Dashboard: React.FC = () => {
         circuitCount: template.circuitCount,
         breakerRatingA: template.breakerRatingA,
         formFactor: template.formFactor,
-        physicalHeightCm: template.physicalHeightCm,
+        physicalHeightCm: template.formFactor === 'vertical' ? template.physicalHeightCm : 0,
+        uHeight: template.formFactor === 'horizontal' ? Math.max(1, Math.round(template.uHeight || 1)) : 0,
         physicalDepthCm: template.physicalDepthCm,
         mountSide: template.formFactor === 'horizontal' ? template.mountSide : 'back',
         uPosition: null,
@@ -774,7 +777,7 @@ const updateDeviceTypes = (devices: Device[]) => {
         if (!validInlets.includes(t.inletType)) return false;
         for (const key of ['socketCount', 'secondarySocketCount', 'powerCapacity', 'supplyVoltage',
                            'ratedCurrent', 'circuitCount', 'breakerRatingA', 'physicalHeightCm',
-                           'physicalWidthCm', 'physicalDepthCm', 'cols', 'quantity'] as const) {
+                           'uHeight', 'physicalWidthCm', 'physicalDepthCm', 'cols', 'quantity'] as const) {
           const v = (t as any)[key];
           if (v !== undefined && (typeof v !== 'number' || !isFinite(v) || v < 0)) return false;
         }
@@ -850,7 +853,12 @@ const updateDeviceTypes = (devices: Device[]) => {
                         isThreePhase: !!t.isThreePhase,
                         circuitCount: Math.max(1, Math.floor(t.circuitCount ?? 1)),
                         breakerRatingA: Math.max(6, Math.floor(t.breakerRatingA ?? 16)),
-                        physicalHeightCm: Math.max(1, t.physicalHeightCm ?? 18),
+                        physicalHeightCm: Math.max(1, t.physicalHeightCm ?? (t.formFactor === 'horizontal' ? 0 : 183)),
+                        uHeight: t.uHeight !== undefined
+                          ? Math.max(0, Math.floor(t.uHeight))
+                          : (t.formFactor === 'horizontal'
+                              ? Math.max(1, Math.ceil(Math.max(0.1, (t.physicalHeightCm ?? 4.4)) * 10 / 44.45)))
+                          : 0,
                         physicalWidthCm: Math.max(1, t.physicalWidthCm ?? 5.5),
                         physicalDepthCm: Math.max(1, t.physicalDepthCm ?? 7.5),
                         cols: Math.max(1, Math.min(2, Math.round(t.cols ?? 1))),
@@ -1514,21 +1522,10 @@ const updateDeviceTypes = (devices: Device[]) => {
                                 })()}
                             </span>
                         </label>
-                        <div className="grid grid-cols-2 gap-2 mt-2">
-                            <div>
-                                <span className="text-[10px] themed-dim block">Rack Depth (cm)</span>
-                                <input
-                                    type="number" min="20" max="200" step="1"
-                                    aria-label="Rack external depth in centimetres"
-                                    value={rackDepth}
-                                    onChange={e => setRackDepth(Number(e.target.value))}
-                                    className="w-full themed-input border rounded p-2 text-sm"
-                                />
-                            </div>
-                            <div className="themed-input border rounded p-2 text-[10px] themed-dim flex flex-col justify-center">
-                                <span>H-PDU span: <b className="themed-muted">{autoRequiredU}U AUTO</b></span>
-                                <span>Inlet bend: <b className="themed-muted">{CORD_BEND_CM[pduInletType]} cm</b></span>
-                            </div>
+                        <div className="mt-2 themed-input border rounded p-2 text-[10px] themed-dim flex flex-wrap gap-x-4 justify-center">
+                            <span>H-PDU total U: <b className="themed-muted">{placement.placements.filter(p => p.formFactor === 'horizontal').reduce((s, p) => s + p.uSpan, 0)}U</b></span>
+                            <span>Inlet bend: <b className="themed-muted">{CORD_BEND_CM[pduInletType]} cm</b></span>
+                            <span>Free after PDUs: <b className="themed-muted">{placement.freeU}U</b></span>
                         </div>
                         <div className="mt-2">
                             <span className="text-[10px] themed-dim block">Placement Strategy (horizontal PDUs; vertical strips use rear L/R channels)</span>
@@ -1589,31 +1586,20 @@ const updateDeviceTypes = (devices: Device[]) => {
                          </label>
                          <input type="range" aria-label="Power factor" min="0.5" max="1" step="0.01" value={powerFactor} onChange={e => setPowerFactor(Number(e.target.value))} className="w-full accent-emerald-500"/>
                     </div>
-                </div>
-            </div>
 
-            {/* Device Group Editor */}
-            <div className="themed-card border p-5 rounded-xl shadow-lg">
-                <h3 className="font-bold themed-heading mb-4 flex items-center gap-2"><Edit3 size={18} /> Device Library</h3>
-                <div className="flex flex-col gap-2 max-h-60 overflow-y-auto pr-2">
-                    {deviceTypes.map(type => (
-                        <button
-                            key={type}
-                            onClick={() => openGroupEditor(type)}
-                            className="text-left text-sm p-2 themed-input hover:opacity-80 rounded border themed-divider truncate"
-                        >
-                            {type}
-                        </button>
-                    ))}
-                </div>
-            </div>
-
+                    {/* ============ PDU CONFIGURATION (merged from former PDU Library section) ============
+                        Defines BOTH vertical (zero-U rear-channel) and rack-based horizontal PDUs.
+                        Single source of truth — front elevation, side view, wiring & reports all draw from it. */}
+                    <div className="border-t themed-divider pt-3">
+                        <h4 className="font-bold themed-heading mb-1 flex items-center gap-2 text-sm"><Zap size={16} /> PDU Configuration</h4>
+                        <p className="text-[10px] themed-dim mb-3">
+                            Define PDU types with parameters &amp; quantity — both vertical (zero-U) and rack-based PDUs live here.
+                            Vertical PDUs mount on the rear left/right channels; they cannot overlap and total strip length must fit within rack height ({rackSize}U).
+                            Rack-based PDU height is configured in U; only mounting depth is set in centimetres. All rack-based PDUs share the same power rating configuration.
+                        </p>
             {/* ============ PDU LIBRARY (PDUs treated like devices) ============ */}
-            <div className="themed-card border p-5 rounded-xl shadow-lg">
-                <h3 className="font-bold themed-heading mb-1 flex items-center gap-2"><Zap size={18} /> PDU Library</h3>
-                <p className="text-[10px] themed-dim mb-3">
-                    Define PDU types with parameters &amp; quantity. Vertical PDUs mount zero-U on the rear left/right channels — they cannot overlap and total strip length must fit within rack height ({rackSize}U). All rack-based PDUs share the same power rating configuration.
-                </p>
+            <div>
+
                 <div className="flex flex-col gap-3 max-h-[420px] overflow-y-auto pr-2" aria-label="PDU types">
                     {pduLibrary.map(t => {
                         const isVert = t.formFactor === 'vertical';
@@ -1645,8 +1631,10 @@ const updateDeviceTypes = (devices: Device[]) => {
                                             value={t.formFactor}
                                             onChange={e => updatePduType(t.id, {
                                                 formFactor: e.target.value as PduFormFactor,
-                                                physicalHeightCm: e.target.value === 'vertical' ? 183 : 4.4,
-                                                physicalDepthCm: e.target.value === 'vertical' ? 5.6 : 7.5,
+                                                // Vertical strips are measured in cm length; rack-based PDUs in U + depth only.
+                                                ...(e.target.value === 'vertical'
+                                                  ? { physicalHeightCm: t.physicalHeightCm > 0 ? t.physicalHeightCm : 183, uHeight: 0, physicalDepthCm: t.physicalDepthCm || 5.6 }
+                                                  : { uHeight: Math.max(1, Math.round(t.uHeight || 1)), physicalHeightCm: 0, physicalDepthCm: t.physicalDepthCm || 7.5 }),
                                             })}
                                             className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
                                         >
@@ -1731,17 +1719,31 @@ const updateDeviceTypes = (devices: Device[]) => {
                                         </div>
                                     </div>
                                     <div>
-                                        <span className="text-[10px] themed-dim block">{isVert ? 'Strip Length (cm)' : 'Body Height (cm)'}</span>
-                                        <input
-                                            type="number" min="1" step="0.1"
-                                            aria-label={`${t.name} physical height in cm`}
-                                            value={t.physicalHeightCm}
-                                            onChange={e => updatePduType(t.id, { physicalHeightCm: Math.max(1, Number(e.target.value) || 1) })}
-                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
-                                        />
+                                        <span className="text-[10px] themed-dim block">{isVert ? 'Strip Length (cm)' : 'Height (U)'}</span>
+                                        {isVert ? (
+                                            <input
+                                                type="number" min="1" step="0.1"
+                                                aria-label={`${t.name} strip length in cm`}
+                                                value={t.physicalHeightCm}
+                                                onChange={e => updatePduType(t.id, { physicalHeightCm: Math.max(1, Number(e.target.value) || 1) })}
+                                                className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                            />
+                                        ) : (
+                                            <select
+                                                aria-label={`${t.name} rack unit height`}
+                                                value={Math.max(1, Math.round(t.uHeight || 1))}
+                                                onChange={e => updatePduType(t.id, { uHeight: Math.max(1, Math.min(rackSize, Math.floor(Number(e.target.value) || 1))) })}
+                                                className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                            >
+                                                <option value="1">1U</option>
+                                                <option value="2">2U</option>
+                                                <option value="3">3U</option>
+                                                <option value="4">4U</option>
+                                            </select>
+                                        )}
                                     </div>
                                     <div>
-                                        <span className="text-[10px] themed-dim block">Body Depth (cm)</span>
+                                        <span className="text-[10px] themed-dim block">{isVert ? 'Body Depth (cm)' : 'Mounting Depth (cm)'}</span>
                                         <input
                                             type="number" min="1" step="0.1"
                                             aria-label={`${t.name} physical depth in cm`}
@@ -1833,7 +1835,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                                 <div className="text-[10px] themed-dim flex justify-between gap-2 flex-wrap">
                                     <span>Power rating: <b>{basePduCapacity.toLocaleString()}W</b> (shared config)</span>
                                     <span>Inlet limit {INLET_MAX_AMPS[t.inletType]} A · feed wire {INLET_WIRE_MM2[t.inletType]}</span>
-                                    <span>{isVert ? `${Math.ceil((t.physicalHeightCm * 10) / 44.45)}U of ${rackSize}U per strip` : `~${Math.max(1, Math.ceil((t.physicalHeightCm * 10) / 44.45))}U each`}</span>
+                                    <span>{isVert ? `${Math.ceil((t.physicalHeightCm * 10) / 44.45)}U of ${rackSize}U per strip` : `${Math.max(1, Math.round(t.uHeight || 1))}U × ${t.physicalDepthCm.toFixed(1)} cm deep each`}</span>
                                 </div>
                             </div>
                         );
@@ -1849,6 +1851,25 @@ const updateDeviceTypes = (devices: Device[]) => {
                 </button>
                 <div className="mt-2 text-[10px] themed-dim">
                     Active instances: {pduInstances.length} ({pduInstances.filter(p => p.formFactor === 'vertical').length} vertical / {pduInstances.filter(p => p.formFactor === 'horizontal').length} horizontal) · Available pairs: {pduAvailablePairs}
+                </div>
+            </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Device Group Editor */}
+            <div className="themed-card border p-5 rounded-xl shadow-lg">
+                <h3 className="font-bold themed-heading mb-4 flex items-center gap-2"><Edit3 size={18} /> Device Library</h3>
+                <div className="flex flex-col gap-2 max-h-60 overflow-y-auto pr-2">
+                    {deviceTypes.map(type => (
+                        <button
+                            key={type}
+                            onClick={() => openGroupEditor(type)}
+                            className="text-left text-sm p-2 themed-input hover:opacity-80 rounded border themed-divider truncate"
+                        >
+                            {type}
+                        </button>
+                    ))}
                 </div>
             </div>
 
@@ -1902,11 +1923,10 @@ const updateDeviceTypes = (devices: Device[]) => {
                      <div className="mt-6 border-t themed-divider pt-4">
                         <h3 className="text-sm font-bold text-slate-800 mb-2">Side View — Mounting Depth & PDU Placement</h3>
                         <p className="text-[11px] text-slate-500 mb-3 max-w-[720px]">
-                            Drag components vertically to change U position, or horizontally between the FRONT (left) and BACK (right) rails. The item follows your cursor from the exact point you grabbed it — no jumping.
+                            Drag &amp; drop: move components vertically to change their U position, or horizontally between the FRONT (left) and BACK (right) mounting rails. Items follow the cursor exactly from the point you grabbed them.
                             Horizontal PDUs marked with * are manually placed — double-click one to return it to automatic placement. The small white notch on each PDU marks its cable inlet end; the label shows the configured inlet type.
-                            Rectangle width shows each item's configured physical depth to scale.
-                            Cables: <span className="font-bold text-blue-600">blue = Feed A</span>, <span className="font-bold text-red-600">red = Feed B</span>;
-                            solid = PSU 1 outlet, dashed = PSU 2 outlet. Vertical zero-U PDUs occupy no rack units and hang in the rear L/R cable channels, so they are intentionally not shown here — manage them in the PDU Library and view them in the rear elevation &amp; reports.
+                            Rectangle width shows each item's configured mounting depth drawn to scale. No cables are drawn here — this is a pure space-planning diagram; see the front wiring diagram for cabling.
+                            Vertical zero-U PDUs occupy no rack units and hang in the rear L/R cable channels, so they are intentionally not shown here — configure them under PDU Configuration in Global Config and view them in the rear elevation &amp; reports.
                         </p>
                         <div className="overflow-x-auto">
                           <RackSideView
