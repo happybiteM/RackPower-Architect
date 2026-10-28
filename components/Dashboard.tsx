@@ -1217,10 +1217,11 @@ const updateDeviceTypes = (devices: Device[]) => {
     pduVertSpaceU,
     pduInletType,
     strategy: placementStrategy,
-    pduPhysicalHeightCm: pduPhysicalHeight / 10, // state stored in cm (legacy values may be mm-ish; treat as cm)
+    pduPhysicalHeightCm: pduPhysicalHeight, // state is in cm
     pduCordLengthM: pduCordLength,
     manualPlacements,
-  }), [rackSize, activeDevices, pdus, deviceDims, pduVertSpaceU, pduInletType, placementStrategy, pduPhysicalHeight, pduCordLength, manualPlacements]);
+    verticalPlacements,
+  }), [rackSize, activeDevices, pdus, deviceDims, pduVertSpaceU, pduInletType, placementStrategy, pduPhysicalHeight, pduCordLength, manualPlacements, verticalPlacements]);
 
   // --- Side-view placement handlers ------------------------------------------
   const handlePlacePdu = useCallback((pduId: string, uPosition: number, mountSide: MountSide) => {
@@ -1248,7 +1249,17 @@ const updateDeviceTypes = (devices: Device[]) => {
     });
   }, []);
 
-  const autoRequiredU = pduRequiredU(pduPhysicalHeight / 10, pduInletType);
+  /** Assign a vertical (zero-U) PDU to a rear channel (left/right), optionally
+   *  with a manual start height from the rack floor in cm. */
+  const handleSetVerticalChannel = useCallback((pduId: string, channel: VerticalChannel, startCmFromFloor?: number) => {
+    setVerticalPlacements(prev => {
+      const cur = prev[pduId];
+      if (cur && cur.channel === channel && cur.startCmFromFloor === startCmFromFloor) return prev;
+      return { ...prev, [pduId]: { channel, startCmFromFloor } };
+    });
+  }, []);
+
+  const autoRequiredU = pduRequiredU(pduPhysicalHeight, pduInletType);
 
   const handleApplyRackPreset = (preset: string) => {
     setRackPreset(preset);
@@ -1737,6 +1748,170 @@ const updateDeviceTypes = (devices: Device[]) => {
                 </div>
             </div>
 
+            {/* ============ PDU LIBRARY (PDUs treated like devices) ============ */}
+            <div className="themed-card border p-5 rounded-xl shadow-lg">
+                <h3 className="font-bold themed-heading mb-1 flex items-center gap-2"><Zap size={18} /> PDU Library</h3>
+                <p className="text-[10px] themed-dim mb-3">
+                    Define PDU types with parameters &amp; quantity. Vertical PDUs mount zero-U on the rear left/right channels — they cannot overlap and total strip length must fit within rack height ({rackSize}U). All rack-based PDUs share the same power rating configuration.
+                </p>
+                <div className="flex flex-col gap-3 max-h-[420px] overflow-y-auto pr-2" aria-label="PDU types">
+                    {pduLibrary.map(t => {
+                        const isVert = t.formFactor === 'vertical';
+                        return (
+                            <div key={t.id} className="themed-input border themed-divider rounded-lg p-3 space-y-2">
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        type="text"
+                                        aria-label={`PDU type name`}
+                                        value={t.name}
+                                        onChange={e => updatePduType(t.id, { name: e.target.value })}
+                                        className="flex-1 min-w-0 bg-transparent border-b themed-divider text-sm font-semibold themed-heading focus:outline-none"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => removePduType(t.id)}
+                                        aria-label={`Delete PDU type ${t.name}`}
+                                        title="Delete PDU type"
+                                        className="p-1.5 rounded hover:bg-red-500/20 text-red-400 shrink-0"
+                                    >
+                                        <Minus size={14} />
+                                    </button>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Form Factor</span>
+                                        <select
+                                            aria-label={`${t.name} form factor`}
+                                            value={t.formFactor}
+                                            onChange={e => updatePduType(t.id, {
+                                                formFactor: e.target.value as PduFormFactor,
+                                                physicalHeightCm: e.target.value === 'vertical' ? 183 : 4.4,
+                                                physicalDepthCm: e.target.value === 'vertical' ? 5.6 : 7.5,
+                                            })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        >
+                                            <option value="vertical">Vertical (zero-U, rear)</option>
+                                            <option value="horizontal">Horizontal (rack-mount)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Quantity</span>
+                                        <div className="flex items-center gap-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => updatePduType(t.id, { quantity: Math.max(0, Math.floor(t.quantity) - 1) })}
+                                                aria-label={`Decrease quantity of ${t.name}`}
+                                                className="p-1.5 rounded border themed-divider themed-input hover:opacity-80 shrink-0"
+                                            >
+                                                <Minus size={12} />
+                                            </button>
+                                            <input
+                                                type="number" min="0" step="1"
+                                                aria-label={`Quantity of ${t.name}`}
+                                                value={t.quantity}
+                                                onChange={e => updatePduType(t.id, { quantity: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+                                                className="w-full themed-input border themed-divider rounded p-1.5 text-xs text-center"
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => updatePduType(t.id, { quantity: Math.floor(t.quantity) + 1 })}
+                                                aria-label={`Increase quantity of ${t.name}`}
+                                                className="p-1.5 rounded border themed-divider themed-input hover:opacity-80 shrink-0"
+                                            >
+                                                <Plus size={12} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Primary Outlets</span>
+                                        <div className="flex gap-1">
+                                            <select
+                                                aria-label={`${t.name} primary socket type`}
+                                                value={t.socketType}
+                                                onChange={e => updatePduType(t.id, { socketType: e.target.value as SocketType })}
+                                                className="w-1/2 themed-input border themed-divider rounded p-1.5 text-xs"
+                                            >
+                                                <option value="C13">C13</option>
+                                                <option value="C19">C19</option>
+                                                <option value="UK">UK</option>
+                                            </select>
+                                            <input
+                                                type="number" min="0"
+                                                aria-label={`${t.name} primary socket count`}
+                                                value={t.socketCount}
+                                                onChange={e => updatePduType(t.id, { socketCount: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+                                                className="w-1/2 themed-input border themed-divider rounded p-1.5 text-xs"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Secondary Outlets</span>
+                                        <div className="flex gap-1">
+                                            <select
+                                                aria-label={`${t.name} secondary socket type`}
+                                                value={t.secondarySocketType ?? ''}
+                                                onChange={e => updatePduType(t.id, {
+                                                    secondarySocketType: (e.target.value || undefined) as SocketType | undefined,
+                                                    secondarySocketCount: e.target.value ? (t.secondarySocketCount ?? 4) : 0,
+                                                })}
+                                                className="w-1/2 themed-input border themed-divider rounded p-1.5 text-xs"
+                                            >
+                                                <option value="">None</option>
+                                                <option value="C13">C13</option>
+                                                <option value="C19">C19</option>
+                                                <option value="UK">UK</option>
+                                            </select>
+                                            <input
+                                                type="number" min="0"
+                                                aria-label={`${t.name} secondary socket count`}
+                                                value={t.secondarySocketCount ?? 0}
+                                                onChange={e => updatePduType(t.id, { secondarySocketCount: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+                                                className="w-1/2 themed-input border themed-divider rounded p-1.5 text-xs"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">{isVert ? 'Strip Length (cm)' : 'Body Height (cm)'}</span>
+                                        <input
+                                            type="number" min="1" step="0.1"
+                                            aria-label={`${t.name} physical height in cm`}
+                                            value={t.physicalHeightCm}
+                                            onChange={e => updatePduType(t.id, { physicalHeightCm: Math.max(1, Number(e.target.value) || 1) })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        />
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] themed-dim block">Body Depth (cm)</span>
+                                        <input
+                                            type="number" min="1" step="0.1"
+                                            aria-label={`${t.name} physical depth in cm`}
+                                            value={t.physicalDepthCm}
+                                            onChange={e => updatePduType(t.id, { physicalDepthCm: Math.max(1, Number(e.target.value) || 1) })}
+                                            className="w-full themed-input border themed-divider rounded p-1.5 text-xs"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="text-[10px] themed-dim flex justify-between">
+                                    <span>Power rating: <b>{basePduCapacity.toLocaleString()}W</b> (shared config)</span>
+                                    <span>{isVert ? `${Math.ceil((t.physicalHeightCm * 10) / 44.45)}U of ${rackSize}U per strip` : `~${Math.max(1, Math.ceil((t.physicalHeightCm * 10) / 44.45))}U each`}</span>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+                <button
+                    type="button"
+                    onClick={addPduType}
+                    className="mt-3 w-full py-2 px-4 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded transition-colors flex items-center justify-center gap-2"
+                    aria-label="Add new PDU type"
+                >
+                    <Plus size={16} /> Add PDU Type
+                </button>
+                <div className="mt-2 text-[10px] themed-dim">
+                    Active instances: {pduInstances.length} ({pduInstances.filter(p => p.formFactor === 'vertical').length} vertical / {pduInstances.filter(p => p.formFactor === 'horizontal').length} horizontal) · Available pairs: {pduAvailablePairs}
+                </div>
+            </div>
+
             {/* Stats Summary */}
              <div className="themed-card border p-5 rounded-xl shadow-lg">
                  <h3 className="font-bold themed-heading mb-4 flex items-center gap-2"><BatteryCharging size={18} /> Summary</h3>
@@ -1782,7 +1957,6 @@ const updateDeviceTypes = (devices: Device[]) => {
                         circuitRating={pduSpecs.amps}
                         isThreePhase={pduSpecs.isThreePhase}
                         pduCols={pduCols}
-                        placement={placement}
                      />
                      {/* Interactive side view: drag PDUs/devices between front & back rails */}
                      <div className="mt-6 border-t themed-divider pt-4">
@@ -1800,6 +1974,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                             pdus={pdus}
                             placement={placement}
                             manualPlacements={manualPlacements}
+                            verticalPlacements={verticalPlacements}
                             rackSizeU={rackSize}
                             rackDepthCm={rackDepth}
                             deviceDims={deviceDims}
@@ -1808,6 +1983,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                             onResetPdu={handleResetPduPlacement}
                             onMoveDevice={handleMoveDevice}
                             onSetDeviceSide={handleSetDeviceSide}
+                            onSetVerticalChannel={handleSetVerticalChannel}
                           />
                         </div>
                      </div>

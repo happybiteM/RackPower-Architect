@@ -970,11 +970,13 @@ const RackVisualizer: React.FC<Props> = ({
                  rowCount={unmountedDevices.length}
                  rowHeight={44}
                  rowProps={{
+                   index: 0,
+                   style: {},
                    items: unmountedDevices,
                    draggedDevice,
                    onDeviceDragStart: handleDeviceDragStart,
                    onCableDragStart: handleCableDragStart,
-                 }}
+                 } as any}
                  style={{ maxHeight: 192, overflowY: 'auto' }}
                  aria-label="Unmounted devices"
                />

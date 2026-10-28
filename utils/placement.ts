@@ -334,6 +334,8 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
     }
   }
 
+  const totalPduU = placements.reduce((s, p) => s + p.uSpan, 0);
+
   const horizontalCount = placements.filter(p => p.formFactor === 'horizontal').length;
   if (horizontalCount && strategy === 'bottom') {
     warnings.push({
@@ -341,8 +343,6 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
       message: `Placed ${horizontalCount} rack-mount PDU(s) using ~${spanU}U each (${totalPduU}U total). Vertical PDUs mount zero-U on the rear rails.`,
     });
   }
-
-  const totalPduU = placements.reduce((s, p) => s + p.uSpan, 0);
   return {
     placements,
     pduVertSpaceU: spanU,
