@@ -17,6 +17,9 @@ export interface PSUConnection {
   socketIndex: number; // 0-based index on the PDU
 }
 
+/** Which side of the rack a component is mounted on (side view convention). */
+export type MountSide = 'front' | 'back';
+
 export interface Device {
   id: string;
   name: string;
@@ -28,11 +31,15 @@ export interface Device {
   // Physical attributes
   uHeight: number;
   uPosition: number | null; // Top-most U position (1-48)
+  mountSide: MountSide;     // Front or rear mounting rails (side view)
   // New granular connection state
   psuConnections: { [psuIndex: number]: PSUConnection | null };
 }
 
 export type SocketType = 'UK' | 'C13' | 'C19';
+
+/** How a PDU is physically installed in the rack. */
+export type PduFormFactor = 'vertical' | 'horizontal';
 
 export interface PDUConfig {
   id: string;
@@ -48,6 +55,18 @@ export interface PDUConfig {
   secondarySocketCount?: number;
 
   powerCapacity: number;
+
+  // --- Rack-mount attributes (side-view placement) --------------------------
+  /** vertical = zero-U strip on rear rails; horizontal = rack unit placed via side view. */
+  formFactor: PduFormFactor;
+  /** Front or rear mounting rail for horizontal PDUs (default: back). */
+  mountSide: MountSide;
+  /** Manual U position override (top-most occupied U). Null = auto placement. */
+  uPosition: number | null;
+  /** Physical body height in cm (used by placement calc & side-view drawing). */
+  physicalHeightCm: number;
+  /** Physical body depth in cm (drawn to scale in the side view). */
+  physicalDepthCm: number;
 }
 
 export interface RackGroup {
@@ -110,6 +129,10 @@ export interface PlacementInput {
   pduVertSpaceU: number;       // 0 = auto-calculate from physical height
   pduInletType: keyof typeof CORD_BEND_CM;
   strategy: PduPlacementStrategy;
+  /** Manual placements coming from the side-view UI (override auto placement). */
+  manualPlacements?: ManualPlacementMap;
+  /** Manual lateral channel assignments for vertical (zero-U) PDUs. */
+  verticalPlacements?: VerticalPlacementMap;
 }
 
 export interface PlacedPDU {
@@ -121,7 +144,55 @@ export interface PlacedPDU {
   endMm: number;          // top edge from rack floor
   centerMm: number;       // vertical centre from rack floor
   clearanceMm: number;    // cord-bend clearance reserved above
+  mountSide: MountSide;   // front or rear rail (side view)
+  formFactor: PduFormFactor;
+  /** Lateral channel on the rear zero-U space (vertical PDUs only). */
+  channel?: VerticalChannel;
+  depthCm: number;        // physical body depth for side-view drawing
 }
+
+/** Manual placement request for a horizontal PDU (from the side-view UI). */
+export interface PduManualPlacement {
+  uPosition: number;      // top-most occupied U
+  mountSide: MountSide;
+}
+
+/** Lateral channel of the rear zero-U space where a vertical PDU hangs. */
+export type VerticalChannel = 'left' | 'right';
+
+/** Manual placement for a vertical (zero-U) PDU on the rear rails. */
+export interface VerticalPlacement {
+  channel: VerticalChannel;
+  /** Top edge of the PDU strip, in cm measured from the rack floor. */
+  startCmFromFloor?: number;
+}
+
+export type ManualPlacementMap = Record<string, PduManualPlacement>;
+export type VerticalPlacementMap = Record<string, VerticalPlacement>;
+
+// ---------------- PDU Library (PDUs treated like devices) -------------------
+
+/** A user-defined PDU *type* with its parameters and available quantity. */
+export interface PduType {
+  id: string;
+  name: string;
+  formFactor: PduFormFactor;
+  socketType: SocketType;
+  socketCount: number;
+  secondarySocketType?: SocketType;
+  secondarySocketCount?: number;
+  /** Same power-rating configuration used for every rack-based PDU. */
+  powerCapacity: number;
+  /** Physical body height in cm (vertical strips: length along the rail). */
+  physicalHeightCm: number;
+  /** Physical body depth in cm (drawn to scale in the side view). */
+  physicalDepthCm: number;
+  /** How many PDUs of this type are available (quantity selector). */
+  quantity: number;
+}
+
+/** Reserved lateral width (cm) of each rear zero-U cable channel. */
+export const VERTICAL_CHANNEL_WIDTH_CM = 5.5;
 
 export interface PlacementWarning {
   level: 'info' | 'warning' | 'error';

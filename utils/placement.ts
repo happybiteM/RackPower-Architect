@@ -19,6 +19,7 @@ import {
   PlacementResult,
   PlacementWarning,
   CORD_BEND_CM,
+  VerticalChannel,
 } from '../types';
 
 export const MM_PER_U = 44.45;          // EIA-310-D: 1U = 44.45mm
@@ -68,31 +69,99 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
     pduVertSpaceU = 0,
     pduInletType = 'C14',
     strategy = 'bottom',
+    manualPlacements = {},
+    verticalPlacements = {},
   } = input;
 
   const uHeightMm = input.uHeightMm ?? MM_PER_U;
   const offsetMm = input.offsetMm ?? RAIL_OFFSET_MM;
-  const pduHcm = input.pduPhysicalHeightCm ?? 18;
+  const defaultPduHcm = input.pduPhysicalHeightCm ?? 18;
   const cordM = input.pduCordLengthM ?? 3;
 
   const warnings: PlacementWarning[] = [];
 
-  // --- Resolve per-PDU vertical space (auto vs manual) -----------------------
-  const autoU = pdus.length ? pduRequiredU(pduHcm, pduInletType) : 1;
-  const spanU = Math.max(1, Math.round(pduVertSpaceU > 0 ? pduVertSpaceU : autoU));
-  const clearanceMm = spanU * uHeightMm - pduHcm * 10;
+  // --- Split PDUs by form factor --------------------------------------------
+  // Vertical (zero-U) PDUs hang on the rear rails and consume no U space.
+  // Horizontal PDUs occupy U slots and are placed automatically (or manually).
+  const horizontalPdus = pdus.filter(p => p.formFactor === 'horizontal');
+  const verticalPdus = pdus.filter(p => p.formFactor !== 'horizontal');
 
-  if (pdus.length * spanU > rackSizeU) {
+  /** Resolve the U span for a specific horizontal PDU. */
+  const spanForPdu = (pdu: PDUConfig): number => {
+    if (pduVertSpaceU > 0) return Math.max(1, Math.round(pduVertSpaceU));
+    const hcm = pdu.physicalHeightCm > 0 ? pdu.physicalHeightCm : defaultPduHcm;
+    return pduRequiredU(hcm, pduInletType);
+  };
+
+  const makePlacement = (pdu: PDUConfig, anchor: number, spanU: number): PlacedPDU => {
+    const startU = anchor - spanU + 1;
+    const startMm = offsetMm + (startU - 1) * uHeightMm;
+    const endMm = startMm + spanU * uHeightMm;
+    const bodyMm = (pdu.physicalHeightCm > 0 ? pdu.physicalHeightCm : defaultPduHcm) * 10;
+    return {
+      pduId: pdu.id,
+      side: pdu.side,
+      uPosition: anchor,
+      uSpan: spanU,
+      startMm,
+      endMm,
+      centerMm: (startMm + endMm) / 2,
+      clearanceMm: Math.max(0, endMm - startMm - bodyMm),
+      mountSide: pdu.mountSide,
+      formFactor: 'horizontal',
+      depthCm: pdu.physicalDepthCm > 0 ? pdu.physicalDepthCm : 7.5,
+    };
+  };
+
+  const placements: PlacedPDU[] = [];
+  const used = new Set<number>();          // U slots taken by auto-placed PDUs
+  const occupiedByManual = new Set<number>(); // U slots taken by manual PDUs or conflicts
+
+  // --- Pass 1: honour manual placements from the side-view UI ----------------
+  for (const pdu of horizontalPdus) {
+    const man = manualPlacements[pdu.id];
+    if (!man) continue;
+    const spanU = spanForPdu(pdu);
+    const anchor = Math.min(rackSizeU, Math.max(spanU, Math.round(man.uPosition)));
+    const startU = anchor - spanU + 1;
+    let conflictWithDevice = false;
+    for (let u = startU; u <= anchor; u++) {
+      const d = devices.find(
+        dev => dev.uPosition !== null && u >= dev.uPosition - dev.uHeight + 1 && u <= dev.uPosition,
+      );
+      if (d) conflictWithDevice = true;
+      if (used.has(u) || occupiedByManual.has(u)) {
+        warnings.push({ level: 'error', message: `${pdu.id} (manual) overlaps another PDU at U${u}.` });
+      }
+      occupiedByManual.add(u);
+    }
+    if (conflictWithDevice) {
+      warnings.push({ level: 'error', message: `${pdu.id} (manual, U${startU}–${anchor}) overlaps a mounted device.` });
+    }
+    placements.push({ ...makePlacement(pdu, anchor, spanU), mountSide: man.mountSide ?? pdu.mountSide });
+  }
+
+  // --- Pass 2: auto-place remaining horizontal PDUs --------------------------
+  const autoPdus = horizontalPdus.filter(p => !manualPlacements[p.id]);
+
+  // --- Resolve representative vertical space (for summary display) -----------
+  const autoU = autoPdus.length ? pduRequiredU(defaultPduHcm, pduInletType) : 1;
+  const spanU = Math.max(1, Math.round(pduVertSpaceU > 0 ? pduVertSpaceU : autoU));
+  const clearanceMm = spanU * uHeightMm - defaultPduHcm * 10;
+
+  const totalHorizontalU =
+    placements.reduce((s, p) => s + p.uSpan, 0) + autoPdus.length * spanU;
+  if (totalHorizontalU > rackSizeU) {
     warnings.push({
       level: 'error',
-      message: `Not enough U space: ${pdus.length} PDUs x ${spanU}U = ${pdus.length * spanU}U exceeds ${rackSizeU}U rack. Reduce PDU count or increase rack size.`,
+      message: `Not enough U space: ${horizontalPdus.length} horizontal PDUs need ~${totalHorizontalU}U in a ${rackSizeU}U rack. Reduce PDU count or increase rack size.`,
     });
   }
 
   // --- Build occupied map ----------------------------------------------------
   // Each U can host at most one PDU unit. Devices block PDUs only when their
   // physical body is taller than their U rating (cable-management clearance).
-  const blocked = new Set<number>();
+  const blocked = new Set<number>(occupiedByManual);
   devices.forEach((d) => {
     const range = deviceOccupiedRangeMm(d, deviceDims, defaultDeviceDim, offsetMm);
     if (!range || d.uPosition === null) return;
@@ -141,13 +210,10 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
     }
   }
 
-  // --- Assign anchors, alternating A/B sides for separation ------------------
-  const placements: PlacedPDU[] = [];
-  const used = new Set<number>();
   const takeAnchor = (): number | null => {
     for (const c of candidates) {
       let conflict = false;
-      for (let u = c - spanU + 1; u <= c; u++) if (used.has(u)) { conflict = true; break; }
+      for (let u = c - spanU + 1; u <= c; u++) if (used.has(u) || blocked.has(u)) { conflict = true; break; }
       if (!conflict) {
         for (let u = c - spanU + 1; u <= c; u++) used.add(u);
         return c;
@@ -156,7 +222,7 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
     return null;
   };
 
-  const orderedPdus = [...pdus].sort((a, b) =>
+  const orderedPdus = [...autoPdus].sort((a, b) =>
     a.side === b.side ? a.index - b.index : a.side === 'A' ? -1 : 1,
   );
 
@@ -165,28 +231,96 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
     if (anchor === null) {
       warnings.push({
         level: 'error',
-        message: `${pdu.id}: no contiguous ${spanU}U free slot available for placement.`,
+        message: `${pdu.id}: no contiguous ${spanU}U free slot available for placement. Drag it onto the side view to place it manually.`,
       });
       continue;
     }
-    const startU = anchor - spanU + 1;
-    const startMm = offsetMm + (startU - 1) * uHeightMm;
-    const endMm = startMm + spanU * uHeightMm;
-    placements.push({
-      pduId: pdu.id,
-      side: pdu.side,
-      uPosition: anchor,
-      uSpan: spanU,
-      startMm,
-      endMm,
-      centerMm: (startMm + endMm) / 2,
-      clearanceMm: Math.max(0, clearanceMm),
+    placements.push(makePlacement(pdu, anchor, spanU));
+  }
+
+  // --- Vertical PDUs: zero-U strips on the REAR cable channels ----------------
+  // The back of the rack offers two lateral channels (left & right). Vertical
+  // PDUs hang in these channels without consuming U space, but they may not
+  // overlap each other and the sum of their lengths must fit within the rack's
+  // usable height. We pack them across the two channels balancing total length
+  // (greedy longest-first), honouring manual channel assignments.
+  const rackUsableHeightMm = rackSizeU * uHeightMm;
+  {
+    const vertSorted = [...verticalPdus].sort((a, b) => b.physicalHeightCm - a.physicalHeightCm);
+    const channelLoad: Record<VerticalChannel, number> = { left: 0, right: 0 };
+    const channelItems: Record<VerticalChannel, PDUConfig[]> = { left: [], right: [] };
+    const overflow: PDUConfig[] = [];
+
+    for (const pdu of vertSorted) {
+      const lenMm = Math.max(1, (pdu.physicalHeightCm > 0 ? pdu.physicalHeightCm : defaultPduHcm) * 10);
+      const manualCh = verticalPlacements[pdu.id]?.channel;
+      // Try preferred channel first (manual assignment, else lighter channel).
+      const order: VerticalChannel[] = manualCh
+        ? [manualCh, manualCh === 'left' ? 'right' : 'left']
+        : channelLoad.left <= channelLoad.right ? ['left', 'right'] : ['right', 'left'];
+      let placed = false;
+      for (const ch of order) {
+        if (channelLoad[ch] + lenMm <= rackUsableHeightMm) {
+          channelLoad[ch] += lenMm;
+          channelItems[ch].push(pdu);
+          placed = true;
+          if (manualCh && ch !== manualCh) {
+            warnings.push({ level: 'warning', message: `${pdu.id}: ${manualCh} rear channel is full — moved to ${ch}.` });
+          }
+          break;
+        }
+      }
+      if (!placed) overflow.push(pdu);
+    }
+
+    if (overflow.length) {
+      warnings.push({
+        level: 'error',
+        message:
+          `Vertical PDU overflow: total strip length exceeds rack height even using both rear channels ` +
+          `(${Math.ceil((channelLoad.left + channelLoad.right) / uHeightMm)}U needed vs ${rackSizeU}U available). ` +
+          `Unplaced: ${overflow.map(p => p.id).join(', ')}.`,
+      });
+    }
+
+    // Emit placements bottom-up per channel (no overlap guaranteed by packing).
+    (['left', 'right'] as VerticalChannel[]).forEach(ch => {
+      let cursorMm = offsetMm;
+      channelItems[ch].forEach(pdu => {
+        const lenMm = Math.max(1, (pdu.physicalHeightCm > 0 ? pdu.physicalHeightCm : defaultPduHcm) * 10);
+        const startMm = cursorMm;
+        const endMm = cursorMm + lenMm;
+        cursorMm = endMm;
+        placements.push({
+          pduId: pdu.id,
+          side: pdu.side,
+          uPosition: Math.min(rackSizeU, Math.round(endMm / uHeightMm)),
+          uSpan: 0,
+          startMm,
+          endMm,
+          centerMm: (startMm + endMm) / 2,
+          clearanceMm: 0,
+          mountSide: 'back',
+          formFactor: 'vertical',
+          channel: ch,
+          depthCm: pdu.physicalDepthCm > 0 ? pdu.physicalDepthCm : 7.5,
+        });
+      });
     });
+
+    if (verticalPdus.length && !overflow.length) {
+      warnings.push({
+        level: 'info',
+        message:
+          `Vertical PDUs: left channel ${Math.ceil(channelLoad.left / uHeightMm)}U / ${rackSizeU}U used, ` +
+          `right channel ${Math.ceil(channelLoad.right / uHeightMm)}U / ${rackSizeU}U used (zero-U mounting).`,
+      });
+    }
   }
 
   // --- Cord-reach advisory ----------------------------------------------------
   if (maxReachU > 0 && mounted.length) {
-    const worst = placements.reduce<{ id: string; dist: number } | null>((acc, p) => {
+    const worst = placements.filter(p => p.formFactor === 'horizontal').reduce<{ id: string; dist: number } | null>((acc, p) => {
       const pduTopU = p.uPosition;
       const far = Math.max(Math.abs(highestDeviceU - pduTopU), Math.abs(lowestDeviceU - pduTopU));
       if (!acc || far > acc.dist) return { id: p.pduId, dist: far };
@@ -200,10 +334,11 @@ export function calculatePduPlacement(input: PlacementCalcInput): PlacementResul
     }
   }
 
-  if (placements.length && strategy === 'bottom') {
+  const horizontalCount = placements.filter(p => p.formFactor === 'horizontal').length;
+  if (horizontalCount && strategy === 'bottom') {
     warnings.push({
       level: 'info',
-      message: `Placed ${placements.length} rack-mount PDU(s) using ${spanU}U each (${placements.length * spanU}U total) with ${(clearanceMm / 10).toFixed(1)} cm cord-bend clearance.`,
+      message: `Placed ${horizontalCount} rack-mount PDU(s) using ~${spanU}U each (${totalPduU}U total). Vertical PDUs mount zero-U on the rear rails.`,
     });
   }
 

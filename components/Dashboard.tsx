@@ -3,8 +3,9 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { parseCSV } from '../utils/csvParser';
 import { DEFAULT_CSV, PDU_VARIANTS } from '../constants';
 import RackVisualizer from './RackVisualizer';
-import { Device, PSUConnection, SocketType, PDUConfig, PhysicalDimensions, RACK_SIZES, CORD_BEND_CM, PduPlacementStrategy } from '../types';
+import { Device, PSUConnection, SocketType, PDUConfig, PduType, PhysicalDimensions, RACK_SIZES, CORD_BEND_CM, PduPlacementStrategy, MountSide, PduFormFactor, ManualPlacementMap, VerticalPlacementMap, VerticalChannel } from '../types';
 import { calculatePduPlacement, DEFAULT_DEVICE_DIM, pduRequiredU } from '../utils/placement';
+import RackSideView from './RackSideView';
 import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus, Zap, Sun, Moon, LayoutDashboard, Boxes, ClipboardList, AlertTriangle } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
@@ -26,6 +27,10 @@ const SOCKET_H = 14;
 const SOCKET_GAP = 4;
 const SOCKET_PADDING = 8;
 const PDU_VERTICAL_GAP = 20;
+
+
+const withMountDefaults = (list: Device[]): Device[] =>
+  list.map(d => ({ ...d, mountSide: d.mountSide ?? 'front' }));
 
 const Dashboard: React.FC = () => {
   const [csvInput, setCsvInput] = useState(DEFAULT_CSV);
@@ -57,6 +62,28 @@ const Dashboard: React.FC = () => {
   const [pduInletType, setPduInletType] = useState<keyof typeof CORD_BEND_CM>('C14');
   const [placementStrategy, setPlacementStrategy] = useState<PduPlacementStrategy>('bottom');
   const [deviceDims, setDeviceDims] = useState<Record<string, PhysicalDimensions>>({});
+  // Horizontal vs vertical rack PDUs + side-view manual placements
+  const [pduFormFactor, setPduFormFactor] = useState<PduFormFactor>('vertical');
+  const [pduMountSide, setPduMountSide] = useState<MountSide>('back');   // default mounting rail for horizontal PDUs
+  const [pduHorizontalDepthCm, setPduHorizontalDepthCm] = useState<number>(7.5); // PDU body depth (side view)
+  const [manualPlacements, setManualPlacements] = useState<ManualPlacementMap>({});
+  const [verticalPlacements, setVerticalPlacements] = useState<VerticalPlacementMap>({});
+
+  // --- PDU Library: PDUs are treated like devices — user defines types -------
+  // Each type has parameters (form factor, sockets, dims) and a quantity.
+  // Vertical & horizontal rack PDUs share the same power rating config.
+  const [pduLibrary, setPduLibrary] = useState<PduType[]>(() => ([
+    {
+      id: 'vertA', name: 'Vertical 0U · C13 x20', formFactor: 'vertical',
+      socketType: 'C13', socketCount: 20, secondarySocketType: 'C19', secondarySocketCount: 4,
+      powerCapacity: 7360, physicalHeightCm: 183, physicalDepthCm: 5.6, quantity: 2,
+    },
+    {
+      id: 'horiz1U', name: 'Horizontal 1U · C13 x8', formFactor: 'horizontal',
+      socketType: 'C13', socketCount: 8, secondarySocketType: undefined, secondarySocketCount: 0,
+      powerCapacity: 7360, physicalHeightCm: 4.4, physicalDepthCm: 7.5, quantity: 0,
+    },
+  ]));
 
   const [basePduCapacity, setBasePduCapacity] = useState(7360);
   const [safetyMargin, setSafetyMargin] = useState(80);
@@ -134,35 +161,131 @@ const Dashboard: React.FC = () => {
 
   const activePduPairs = manualPduPairs !== null ? manualPduPairs : calculatedPduPairs;
 
-  // Generate the PDU Definitions based on the calculated requirement
-  const pdus: PDUConfig[] = useMemo(() => {
+  // --- PDU Library helpers ----------------------------------------------------
+  // PDUs are treated like devices: the user defines PDU *types* (parameters +
+  // quantity) in a dedicated section, and instances are stamped from them.
+  const pduSeqRef = useRef(1);
+  const nextPduTypeId = () => `pduType${pduSeqRef.current++}`;
+
+  const makeDefaultPduType = (): PduType => ({
+    id: nextPduTypeId(),
+    name: 'New PDU Type',
+    formFactor: 'vertical',
+    socketType: 'C13',
+    socketCount: 20,
+    secondarySocketType: 'C19',
+    secondarySocketCount: 4,
+    powerCapacity: basePduCapacity,
+    physicalHeightCm: 183,
+    physicalDepthCm: 5.6,
+    quantity: 1,
+  });
+
+  const updatePduType = (id: string, patch: Partial<PduType>) => {
+    setPduLibrary(prev => prev.map(t => t.id === id ? { ...t, ...patch } : t));
+  };
+
+  const addPduType = () => {
+    setPduLibrary(prev => [...prev, makeDefaultPduType()]);
+  };
+
+  const removePduType = (id: string) => {
+    setPduLibrary(prev => prev.filter(t => t.id !== id));
+    // Drop placements referencing instances that no longer exist is handled
+    // automatically by placement recompute; stale keys are harmless.
+  };
+
+  // Expand the PDU library into concrete instances (qty × type), like devices.
+  // Instances alternate between Feed A and Feed B so redundancy pairs stay balanced.
+  const pduInstances: PDUConfig[] = useMemo(() => {
     const list: PDUConfig[] = [];
-    for (let i = 0; i < activePduPairs; i++) {
-        const configA: PDUConfig = {
-            id: `A${i+1}`,
-            side: 'A',
-            index: i,
-            socketType: socketType,
-            socketCount: baseSocketsPerPDU,
-            secondarySocketType: secondarySocketType,
-            secondarySocketCount: secondarySocketsPerPDU,
-            powerCapacity: basePduCapacity
-        };
-        const configB: PDUConfig = {
-            id: `B${i+1}`,
-            side: 'B',
-            index: i,
-            socketType: socketType,
-            socketCount: baseSocketsPerPDU,
-            secondarySocketType: secondarySocketType,
-            secondarySocketCount: secondarySocketsPerPDU,
-            powerCapacity: basePduCapacity
-        };
-        list.push(configA);
-        list.push(configB);
+    let aCount = 0, bCount = 0;
+    for (const t of pduLibrary) {
+      for (let q = 0; q < Math.max(0, Math.floor(t.quantity)); q++) {
+        const side: 'A' | 'B' = aCount <= bCount ? 'A' : 'B';
+        if (side === 'A') aCount++; else bCount++;
+        list.push({
+          id: `${side}${side === 'A' ? aCount : bCount}`,
+          side,
+          index: (side === 'A' ? aCount : bCount) - 1,
+          socketType: t.socketType,
+          socketCount: Math.max(1, t.socketCount),
+          secondarySocketType: t.secondarySocketType,
+          secondarySocketCount: t.secondarySocketCount ?? 0,
+          powerCapacity: basePduCapacity,   // same power rating config for vertical & horizontal PDUs
+          formFactor: t.formFactor,
+          physicalHeightCm: t.physicalHeightCm,
+          physicalDepthCm: t.physicalDepthCm,
+          mountSide: t.formFactor === 'horizontal' ? pduMountSide : 'back',
+          uPosition: null,
+        });
+      }
     }
     return list;
-  }, [activePduPairs, baseSocketsPerPDU, secondarySocketsPerPDU, basePduCapacity, socketType, secondarySocketType]);
+  }, [pduLibrary, basePduCapacity, pduMountSide]);
+
+  const pduAvailablePairs = Math.min(
+    pduInstances.filter(p => p.side === 'A').length,
+    pduInstances.filter(p => p.side === 'B').length,
+  );
+
+  // Effective PDU list: library instances when defined; legacy global-config
+  // synthesis otherwise. When the library cannot cover the required pairs, pad
+  // with copies of the last-defined type so wiring math stays consistent.
+  const pdus: PDUConfig[] = useMemo(() => {
+    if (pduInstances.length > 0) {
+      const neededPairs = Math.max(activePduPairs, 1);
+      if (pduAvailablePairs >= neededPairs) return pduInstances;
+      const out = [...pduInstances];
+      let aCount = out.filter(p => p.side === 'A').length;
+      let bCount = out.filter(p => p.side === 'B').length;
+      const template = pduLibrary[pduLibrary.length - 1];
+      while (Math.min(aCount, bCount) < neededPairs && template) {
+        const growA = aCount <= bCount;
+        const idx = growA ? ++aCount : ++bCount;
+        out.push({
+          id: `${growA ? 'A' : 'B'}${idx}`,
+          side: growA ? 'A' : 'B',
+          index: idx - 1,
+          socketType: template.socketType,
+          socketCount: Math.max(1, template.socketCount),
+          secondarySocketType: template.secondarySocketType,
+          secondarySocketCount: template.secondarySocketCount ?? 0,
+          powerCapacity: basePduCapacity,
+          formFactor: template.formFactor,
+          physicalHeightCm: template.physicalHeightCm,
+          physicalDepthCm: template.physicalDepthCm,
+          mountSide: template.formFactor === 'horizontal' ? pduMountSide : 'back',
+          uPosition: null,
+        });
+      }
+      return out;
+    }
+
+    const list: PDUConfig[] = [];
+    for (let i = 0; i < activePduPairs; i++) {
+        const shared = {
+            socketType: socketType,
+            socketCount: baseSocketsPerPDU,
+            secondarySocketType: secondarySocketType,
+            secondarySocketCount: secondarySocketsPerPDU,
+            powerCapacity: basePduCapacity,   // same power rating config for vertical & horizontal PDUs
+            formFactor: pduFormFactor,
+            physicalHeightCm: pduPhysicalHeight / 10,
+            physicalDepthCm: pduHorizontalDepthCm,
+        };
+        const mk = (side: 'A' | 'B'): PDUConfig => ({
+            id: `${side}${i + 1}`,
+            side,
+            index: i,
+            ...shared,
+            mountSide: shared.formFactor === 'horizontal' ? pduMountSide : 'back',
+            uPosition: null,
+        });
+        list.push(mk('A'), mk('B'));
+    }
+    return list;
+  }, [activePduPairs, pduInstances, pduAvailablePairs, pduLibrary, baseSocketsPerPDU, secondarySocketsPerPDU, basePduCapacity, socketType, secondarySocketType, pduFormFactor, pduMountSide, pduPhysicalHeight, pduHorizontalDepthCm]);
 
   // Helper: Get geometric Y position of a socket on a PDU
   // Used to find closest socket to device
@@ -281,7 +404,7 @@ const Dashboard: React.FC = () => {
     // --- PHASE 1: DUAL PSU DEVICES (Try to match sockets on A & B) ---
     for (const d of dualPSUDevices) {
         if (!d.uPosition) {
-            processedDevices.push({ ...d, psuConnections: {} });
+            processedDevices.push({ ...d, mountSide: d.mountSide ?? 'front', psuConnections: {} });
             continue;
         }
 
@@ -401,7 +524,7 @@ const Dashboard: React.FC = () => {
     
     for (const d of otherDevices) {
         if (!d.uPosition) {
-            processedDevices.push({ ...d, psuConnections: {} });
+            processedDevices.push({ ...d, mountSide: d.mountSide ?? 'front', psuConnections: {} });
             continue;
         }
 
@@ -526,7 +649,7 @@ const Dashboard: React.FC = () => {
             pduCols
         );
 
-        setActiveDevices(finalDevices);
+        setActiveDevices(withMountDefaults(finalDevices));
         updateDeviceTypes(finalDevices);
         toast.success(`Loaded ${finalDevices.length} devices successfully`);
       }
@@ -575,7 +698,7 @@ const updateDeviceTypes = (devices: Device[]) => {
         safetyMargin,
         pduCols
     );
-    setActiveDevices(finalDevices);
+    setActiveDevices(withMountDefaults(finalDevices));
   };
 
   const handleApplyRackSize = () => {
@@ -730,7 +853,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                     if (config.secondarySocketType) setSecondarySocketType(config.secondarySocketType);
                     
                     if (config.activeDevices) {
-                        setActiveDevices(config.activeDevices);
+                        setActiveDevices(withMountDefaults(config.activeDevices as Device[]));
                         updateDeviceTypes(config.activeDevices);
                         toast.success(`Loaded ${config.activeDevices.length} devices from config`);
                     } else {
@@ -1096,7 +1219,34 @@ const updateDeviceTypes = (devices: Device[]) => {
     strategy: placementStrategy,
     pduPhysicalHeightCm: pduPhysicalHeight / 10, // state stored in cm (legacy values may be mm-ish; treat as cm)
     pduCordLengthM: pduCordLength,
-  }), [rackSize, activeDevices, pdus, deviceDims, pduVertSpaceU, pduInletType, placementStrategy, pduPhysicalHeight, pduCordLength]);
+    manualPlacements,
+  }), [rackSize, activeDevices, pdus, deviceDims, pduVertSpaceU, pduInletType, placementStrategy, pduPhysicalHeight, pduCordLength, manualPlacements]);
+
+  // --- Side-view placement handlers ------------------------------------------
+  const handlePlacePdu = useCallback((pduId: string, uPosition: number, mountSide: MountSide) => {
+    setManualPlacements(prev => {
+      const cur = prev[pduId];
+      if (cur && cur.uPosition === uPosition && cur.mountSide === mountSide) return prev;
+      return { ...prev, [pduId]: { uPosition, mountSide } };
+    });
+  }, []);
+
+  const handleResetPduPlacement = useCallback((pduId: string) => {
+    setManualPlacements(prev => {
+      if (!prev[pduId]) return prev;
+      const next = { ...prev };
+      delete next[pduId];
+      return next;
+    });
+  }, []);
+
+  const handleSetDeviceSide = useCallback((deviceId: string, side: MountSide) => {
+    setActiveDevices(prev => {
+      const d = prev.find(x => x.id === deviceId);
+      if (!d || d.mountSide === side) return prev;
+      return prev.map(x => x.id === deviceId ? { ...x, mountSide: side } : x);
+    });
+  }, []);
 
   const autoRequiredU = pduRequiredU(pduPhysicalHeight / 10, pduInletType);
 
@@ -1428,9 +1578,59 @@ const updateDeviceTypes = (devices: Device[]) => {
                         <label className="text-xs themed-muted uppercase font-bold flex items-center justify-between">
                             <span>Rack-Mount PDU Placement</span>
                             <span className="text-[10px] px-1.5 py-0.5 rounded themed-input themed-dim border themed-divider">
-                                {placementStrategy === 'bottom' ? 'BACK-BOTTOM' : placementStrategy === 'top' ? 'BACK-TOP' : 'BACK-CENTER'}
+                                {pduFormFactor === 'vertical' ? 'VERTICAL 0U' : `${pduMountSide.toUpperCase()}-${placementStrategy === 'bottom' ? 'BOTTOM' : placementStrategy === 'top' ? 'TOP' : 'CENTER'}`}
                             </span>
                         </label>
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                                <span className="text-[10px] themed-dim block">PDU Form Factor</span>
+                                <select
+                                    aria-label="PDU form factor"
+                                    value={pduFormFactor}
+                                    onChange={e => setPduFormFactor(e.target.value as PduFormFactor)}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                >
+                                    <option value="vertical">Vertical (zero-U, rear rails)</option>
+                                    <option value="horizontal">Horizontal (rack-mount, uses U space)</option>
+                                </select>
+                            </div>
+                            {pduFormFactor === 'horizontal' && (
+                            <div>
+                                <span className="text-[10px] themed-dim block">Default Mounting Rail</span>
+                                <select
+                                    aria-label="PDU mounting rail"
+                                    value={pduMountSide}
+                                    onChange={e => setPduMountSide(e.target.value as MountSide)}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                >
+                                    <option value="back">Back (rear rails)</option>
+                                    <option value="front">Front</option>
+                                </select>
+                            </div>
+                            )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                                <span className="text-[10px] themed-dim block">PDU Depth (cm)</span>
+                                <input
+                                    type="number" min="1" max={Math.max(2, rackDepth - 2)} step="0.5"
+                                    aria-label="PDU physical depth in centimetres"
+                                    value={pduHorizontalDepthCm}
+                                    onChange={e => setPduHorizontalDepthCm(Number(e.target.value))}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                />
+                            </div>
+                            <div>
+                                <span className="text-[10px] themed-dim block">Rack Depth (cm)</span>
+                                <input
+                                    type="number" min="20" max="200" step="1"
+                                    aria-label="Rack external depth in centimetres"
+                                    value={rackDepth}
+                                    onChange={e => setRackDepth(Number(e.target.value))}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                />
+                            </div>
+                        </div>
                         <div className="grid grid-cols-2 gap-2 mt-2">
                             <div>
                                 <span className="text-[10px] themed-dim block">Vertical Space (U)</span>
@@ -1460,7 +1660,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                             </div>
                         </div>
                         <div className="mt-2">
-                            <span className="text-[10px] themed-dim block">Placement Strategy (rear mounting rails)</span>
+                            <span className="text-[10px] themed-dim block">Placement Strategy {pduFormFactor === 'horizontal' ? '(horizontal PDUs)' : '(rear mounting rails)'}</span>
                             <select
                                 aria-label="PDU placement strategy"
                                 value={placementStrategy}
@@ -1472,6 +1672,16 @@ const updateDeviceTypes = (devices: Device[]) => {
                                 <option value="top">Top of rack</option>
                             </select>
                         </div>
+                        {Object.keys(manualPlacements).length > 0 && (
+                            <button
+                                type="button"
+                                onClick={() => setManualPlacements({})}
+                                className="mt-2 w-full text-[11px] themed-input border themed-divider rounded p-1.5 hover:opacity-80"
+                                aria-label="Clear all manual PDU placements"
+                            >
+                                Clear manual placements ({Object.keys(manualPlacements).length}) → re-auto-place all
+                            </button>
+                        )}
                         <div className="mt-2 text-[10px] themed-dim space-y-1" aria-live="polite">
                             {placement.warnings.length === 0 && <div>No placement issues detected.</div>}
                             {placement.warnings.map((w, i) => (
@@ -1481,11 +1691,11 @@ const updateDeviceTypes = (devices: Device[]) => {
                                 </div>
                             ))}
                         </div>
-                        {placement.placements.length > 0 && (
+                        {placement.placements.filter(p => p.formFactor === 'horizontal').length > 0 && (
                             <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] font-mono themed-muted">
-                                {placement.placements.map(p => (
+                                {placement.placements.filter(p => p.formFactor === 'horizontal').map(p => (
                                     <div key={p.pduId} className="themed-input border themed-divider rounded px-1.5 py-1 flex justify-between">
-                                        <span>{p.pduId}</span>
+                                        <span>{p.pduId} · {p.mountSide}{manualPlacements[p.pduId] ? '*' : ''}</span>
                                         <span title={`${(p.startMm/10).toFixed(1)}–${(p.endMm/10).toFixed(1)} cm from floor`}>U{p.uPosition - p.uSpan + 1}–{p.uPosition}</span>
                                     </div>
                                 ))}
@@ -1554,6 +1764,7 @@ const updateDeviceTypes = (devices: Device[]) => {
         >
              <div ref={visualizerRef} className="p-4 themed-diagram inline-block rounded-xl">
                  {activeDevices.length > 0 ? (
+                     <>
                      <RackVisualizer
                         devices={activeDevices}
                         onMoveDevice={handleMoveDevice}
@@ -1573,6 +1784,34 @@ const updateDeviceTypes = (devices: Device[]) => {
                         pduCols={pduCols}
                         placement={placement}
                      />
+                     {/* Interactive side view: drag PDUs/devices between front & back rails */}
+                     <div className="mt-6 border-t themed-divider pt-4">
+                        <h3 className="text-sm font-bold text-slate-800 mb-2">Side View — Mounting Depth & PDU Placement</h3>
+                        <p className="text-[11px] text-slate-500 mb-3 max-w-[720px]">
+                            Drag components vertically to change U position, or horizontally between the FRONT (left) and BACK (right) rails.
+                            Horizontal PDUs marked with * are manually placed — double-click one to return it to automatic placement.
+                            Rectangle width shows each item's configured physical depth to scale.
+                            Cables: <span className="font-bold text-blue-600">blue = Feed A</span>, <span className="font-bold text-red-600">red = Feed B</span>;
+                            solid = PSU 1 outlet, dashed = PSU 2 outlet; vertical PDUs render as full-height dashed strips on the rear rail.
+                        </p>
+                        <div className="overflow-x-auto">
+                          <RackSideView
+                            devices={activeDevices}
+                            pdus={pdus}
+                            placement={placement}
+                            manualPlacements={manualPlacements}
+                            rackSizeU={rackSize}
+                            rackDepthCm={rackDepth}
+                            deviceDims={deviceDims}
+                            defaultDeviceDim={DEFAULT_DEVICE_DIM}
+                            onPlacePdu={handlePlacePdu}
+                            onResetPdu={handleResetPduPlacement}
+                            onMoveDevice={handleMoveDevice}
+                            onSetDeviceSide={handleSetDeviceSide}
+                          />
+                        </div>
+                     </div>
+                     </>
                  ) : (
                      <div className="themed-dim mt-20 text-center w-[600px]">No devices loaded. Upload a CSV to begin.</div>
                  )}
