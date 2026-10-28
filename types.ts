@@ -143,8 +143,12 @@ export const RACK_SIZES: Record<string, { label: string; external: PhysicalDimen
 };
 
 /** Vertical zero-U space required above a rack-mounted PDU for its inlet cord bend. */
-export const CORD_BEND_CM: Record<'C13' | 'C14' | 'C19' | 'C20', number> = {
+/** Required vertical bend/clearance space (cm) above a rack-mounted PDU for
+ *  each inlet/plug type. Includes legacy cord ends (C13/C19) and modern
+ *  PduInletType values so placement math works for every library entry. */
+export const CORD_BEND_CM: Record<'C13' | 'C14' | 'C19' | 'C20' | PduInletType, number> = {
   C13: 5, C14: 5, C19: 6, C20: 6,
+  'IEC-309-16A': 8, 'IEC-309-32A': 10, Hardwired: 4,
 };
 
 export type PduPlacementStrategy = 'bottom' | 'top' | 'center';
@@ -225,8 +229,14 @@ export interface PduType {
   breakerRatingA: number;     // upstream breaker rating (A)
   /** Physical body height in cm (vertical strips: length along the rail). */
   physicalHeightCm: number;
+  /** Physical body width in cm (horizontal PDUs — faceplate width). */
+  physicalWidthCm: number;
   /** Physical body depth in cm (drawn to scale in the side view). */
   physicalDepthCm: number;
+  /** Socket column layout on the PDU face (1 = single column, 2 = wide). */
+  cols: number;
+  /** Default mounting rail for horizontal PDUs of this type. */
+  mountSide: MountSide;
   /** How many PDUs of this type are available (quantity selector). */
   quantity: number;
 }
