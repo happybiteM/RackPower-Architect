@@ -3,8 +3,9 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { parseCSV } from '../utils/csvParser';
 import { DEFAULT_CSV, PDU_VARIANTS } from '../constants';
 import RackVisualizer from './RackVisualizer';
-import { Device, PSUConnection, SocketType, PDUConfig } from '../types';
-import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus, Zap, Sun, Moon, LayoutDashboard, Boxes, ClipboardList } from 'lucide-react';
+import { Device, PSUConnection, SocketType, PDUConfig, PhysicalDimensions, RACK_SIZES, CORD_BEND_CM, PduPlacementStrategy } from '../types';
+import { calculatePduPlacement, DEFAULT_DEVICE_DIM, pduRequiredU } from '../utils/placement';
+import { Upload, Settings, Printer, BatteryCharging, Edit3, Save, RotateCcw, Download, FileImage, FileText, FileCode, RefreshCw, FileJson, Plus, Minus, Zap, Sun, Moon, LayoutDashboard, Boxes, ClipboardList, AlertTriangle } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 import DOMPurify from 'dompurify';
@@ -49,6 +50,14 @@ const Dashboard: React.FC = () => {
   const [pduPhysicalWidth, setPduPhysicalWidth] = useState<number>(5.5); // cm
   const [pduCordLength, setPduCordLength] = useState<number>(3); // meters
 
+  // Rack-mount PDU placement configuration
+  const [rackPreset, setRackPreset] = useState<string>('48U');
+  const [rackDepth, setRackDepth] = useState<number>(120); // cm (external)
+  const [pduVertSpaceU, setPduVertSpaceU] = useState<number>(0); // 0 = auto
+  const [pduInletType, setPduInletType] = useState<keyof typeof CORD_BEND_CM>('C14');
+  const [placementStrategy, setPlacementStrategy] = useState<PduPlacementStrategy>('bottom');
+  const [deviceDims, setDeviceDims] = useState<Record<string, PhysicalDimensions>>({});
+
   const [basePduCapacity, setBasePduCapacity] = useState(7360);
   const [safetyMargin, setSafetyMargin] = useState(80);
   const [powerFactor, setPowerFactor] = useState(0.95);
@@ -61,6 +70,7 @@ const Dashboard: React.FC = () => {
   const [deviceTypes, setDeviceTypes] = useState<string[]>([]);
   const [editingType, setEditingType] = useState<string>('');
   const [editValues, setEditValues] = useState({ uHeight: 1, typical: 0, max: 0 });
+  const [editDims, setEditDims] = useState<PhysicalDimensions>({ ...DEFAULT_DEVICE_DIM });
 
   // UI State
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -604,6 +614,12 @@ const updateDeviceTypes = (devices: Device[]) => {
     pduPhysicalHeight?: number;
     pduPhysicalWidth?: number;
     pduCordLength?: number;
+    rackPreset?: string;
+    rackDepth?: number;
+    pduVertSpaceU?: number;
+    pduInletType?: 'C13' | 'C14' | 'C19' | 'C20';
+    placementStrategy?: PduPlacementStrategy;
+    deviceDims?: Record<string, PhysicalDimensions>;
     basePduCapacity?: number;
     safetyMargin?: number;
     powerFactor?: number;
@@ -624,6 +640,26 @@ const updateDeviceTypes = (devices: Device[]) => {
     if (config.pduPhysicalHeight !== undefined && (typeof config.pduPhysicalHeight !== 'number' || config.pduPhysicalHeight < 0 || config.pduPhysicalHeight > 500)) return false;
     if (config.pduPhysicalWidth !== undefined && (typeof config.pduPhysicalWidth !== 'number' || config.pduPhysicalWidth < 0 || config.pduPhysicalWidth > 100)) return false;
     if (config.pduCordLength !== undefined && (typeof config.pduCordLength !== 'number' || config.pduCordLength < 0 || config.pduCordLength > 100)) return false;
+
+    // Validate rack-mount PDU placement fields
+    if (config.rackPreset !== undefined && (typeof config.rackPreset !== 'string' || !(config.rackPreset in RACK_SIZES))) return false;
+    if (config.rackDepth !== undefined && (typeof config.rackDepth !== 'number' || config.rackDepth < 10 || config.rackDepth > 200)) return false;
+    if (config.pduVertSpaceU !== undefined && (typeof config.pduVertSpaceU !== 'number' || config.pduVertSpaceU < 0 || config.pduVertSpaceU > 6)) return false;
+    const validInlets = ['C13', 'C14', 'C19', 'C20'];
+    if (config.pduInletType !== undefined && !validInlets.includes(config.pduInletType)) return false;
+    const validStrategies = ['bottom', 'top', 'center'];
+    if (config.placementStrategy !== undefined && !validStrategies.includes(config.placementStrategy)) return false;
+    if (config.deviceDims !== undefined) {
+      if (typeof config.deviceDims !== 'object' || config.deviceDims === null || Array.isArray(config.deviceDims)) return false;
+      for (const [name, dim] of Object.entries(config.deviceDims)) {
+        if (typeof name !== 'string') return false;
+        if (typeof dim !== 'object' || dim === null) return false;
+        for (const key of ['width', 'height', 'depth'] as const) {
+          const v = (dim as any)[key];
+          if (typeof v !== 'number' || v <= 0 || v > 300) return false;
+        }
+      }
+    }
     if (config.basePduCapacity !== undefined && (typeof config.basePduCapacity !== 'number' || config.basePduCapacity < 0 || config.basePduCapacity > 50000)) return false;
     if (config.safetyMargin !== undefined && (typeof config.safetyMargin !== 'number' || config.safetyMargin < 0 || config.safetyMargin > 100)) return false;
     if (config.powerFactor !== undefined && (typeof config.powerFactor !== 'number' || config.powerFactor < 0 || config.powerFactor > 1)) return false;
@@ -681,6 +717,12 @@ const updateDeviceTypes = (devices: Device[]) => {
                     if (config.pduPhysicalHeight) setPduPhysicalHeight(config.pduPhysicalHeight);
                     if (config.pduPhysicalWidth) setPduPhysicalWidth(config.pduPhysicalWidth);
                     if (config.pduCordLength) setPduCordLength(config.pduCordLength);
+                    if (config.rackPreset) setRackPreset(config.rackPreset);
+                    if (config.rackDepth) setRackDepth(config.rackDepth);
+                    if (config.pduVertSpaceU !== undefined) setPduVertSpaceU(config.pduVertSpaceU);
+                    if (config.pduInletType) setPduInletType(config.pduInletType);
+                    if (config.placementStrategy) setPlacementStrategy(config.placementStrategy);
+                    if (config.deviceDims) setDeviceDims(config.deviceDims);
                     if (config.basePduCapacity) setBasePduCapacity(config.basePduCapacity);
                     if (config.safetyMargin) setSafetyMargin(config.safetyMargin);
                     if (config.powerFactor) setPowerFactor(config.powerFactor);
@@ -754,6 +796,12 @@ const updateDeviceTypes = (devices: Device[]) => {
         pduPhysicalHeight,
         pduPhysicalWidth,
         pduCordLength,
+        rackPreset,
+        rackDepth,
+        pduVertSpaceU,
+        pduInletType,
+        placementStrategy,
+        deviceDims,
         basePduCapacity,
         safetyMargin,
         powerFactor,
@@ -983,6 +1031,7 @@ const updateDeviceTypes = (devices: Device[]) => {
               typical: sample.typicalPower,
               max: sample.powerRatingPerDevice
           });
+          setEditDims(deviceDims[type] || { ...DEFAULT_DEVICE_DIM, height: sample.uHeight * 4.45 });
           setEditGroupModalOpen(true);
       }
   };
@@ -1001,6 +1050,7 @@ const updateDeviceTypes = (devices: Device[]) => {
               return d;
           });
       });
+      setDeviceDims(prev => ({ ...prev, [editingType]: { ...editDims } }));
       setEditGroupModalOpen(false);
   };
 
@@ -1033,6 +1083,32 @@ const updateDeviceTypes = (devices: Device[]) => {
     });
     return loads;
   }, [activeDevices, pdus]);
+
+  // --- Automatic rack-mount PDU placement -----------------------------------
+  const placement = useMemo(() => calculatePduPlacement({
+    rackSizeU: rackSize,
+    devices: activeDevices,
+    pdus,
+    deviceDims,
+    defaultDeviceDim: DEFAULT_DEVICE_DIM,
+    pduVertSpaceU,
+    pduInletType,
+    strategy: placementStrategy,
+    pduPhysicalHeightCm: pduPhysicalHeight / 10, // state stored in cm (legacy values may be mm-ish; treat as cm)
+    pduCordLengthM: pduCordLength,
+  }), [rackSize, activeDevices, pdus, deviceDims, pduVertSpaceU, pduInletType, placementStrategy, pduPhysicalHeight, pduCordLength]);
+
+  const autoRequiredU = pduRequiredU(pduPhysicalHeight / 10, pduInletType);
+
+  const handleApplyRackPreset = (preset: string) => {
+    setRackPreset(preset);
+    const spec = RACK_SIZES[preset];
+    if (spec) {
+      setRackSize(spec.internalU);
+      setTempRackSize(spec.internalU);
+      setRackDepth(spec.external.depth);
+    }
+  };
 
   return (
     <div className="min-h-screen themed-app p-4 md:p-8">
@@ -1164,7 +1240,18 @@ const updateDeviceTypes = (devices: Device[]) => {
 
                     {/* Rack Size */}
                     <div className="border-b themed-divider pb-3">
-                        <label className="text-xs themed-muted uppercase font-bold">Rack Size (U)</label>
+                        <label className="text-xs themed-muted uppercase font-bold">Rack Preset</label>
+                        <select
+                            aria-label="Rack size preset"
+                            value={rackPreset}
+                            onChange={e => handleApplyRackPreset(e.target.value)}
+                            className="w-full themed-input border rounded p-2 mt-1 text-sm"
+                        >
+                            {Object.entries(RACK_SIZES).map(([k, v]) => (
+                                <option key={k} value={k}>{v.label} · {v.external.width}×{v.external.height}×{v.external.depth} cm</option>
+                            ))}
+                        </select>
+                        <label className="text-xs themed-muted uppercase font-bold block mt-2">Rack Size (U)</label>
                         <div className="flex gap-2 mt-1 mb-2">
                             <input
                                 type="number" min="4" max="52" aria-label="Rack size in U"
@@ -1172,6 +1259,20 @@ const updateDeviceTypes = (devices: Device[]) => {
                                 className="w-full themed-input border rounded p-2"
                             />
                             <button onClick={handleApplyRackSize} className="bg-blue-600 hover:bg-blue-500 text-white px-2 rounded text-xs font-bold">SET</button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <span className="text-[10px] themed-dim block">External Depth (cm)</span>
+                                <input
+                                    type="number" min="10" max="200" aria-label="Rack external depth in cm"
+                                    value={rackDepth} onChange={e => setRackDepth(Math.max(10, Math.min(200, Number(e.target.value) || 10)))}
+                                    className="w-full themed-input border rounded p-2"
+                                />
+                            </div>
+                            <div className="themed-input border rounded p-2 text-[10px] themed-dim flex flex-col justify-center">
+                                <span>Usable height: <b className="themed-muted">{(rackSize * 4.45).toFixed(1)} cm</b></span>
+                                <span>Free after PDUs: <b className="themed-muted">{placement.freeU}U</b></span>
+                            </div>
                         </div>
                     </div>
 
@@ -1289,7 +1390,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                     </div>
 
                     {/* PDU Physical Specs */}
-                    <div>
+                    <div className="border-b themed-divider pb-3">
                         <label className="text-xs themed-muted uppercase font-bold">PDU Dimensions</label>
                         <div className="grid grid-cols-2 gap-2 mt-1">
                             <div>
@@ -1320,6 +1421,76 @@ const updateDeviceTypes = (devices: Device[]) => {
                                 <option value={2}>Double Column (Wide)</option>
                             </select>
                         </div>
+                    </div>
+
+                    {/* Rack-Mount PDU Placement */}
+                    <div className="border-b themed-divider pb-3">
+                        <label className="text-xs themed-muted uppercase font-bold flex items-center justify-between">
+                            <span>Rack-Mount PDU Placement</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded themed-input themed-dim border themed-divider">
+                                {placementStrategy === 'bottom' ? 'BACK-BOTTOM' : placementStrategy === 'top' ? 'BACK-TOP' : 'BACK-CENTER'}
+                            </span>
+                        </label>
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                                <span className="text-[10px] themed-dim block">Vertical Space (U)</span>
+                                <select
+                                    aria-label="PDU vertical space in U"
+                                    value={pduVertSpaceU}
+                                    onChange={e => setPduVertSpaceU(Number(e.target.value))}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                >
+                                    <option value={0}>AUTO ({autoRequiredU}U)</option>
+                                    {[1,2,3,4,5,6].map(u => <option key={u} value={u}>{u}U</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <span className="text-[10px] themed-dim block">Inlet Type</span>
+                                <select
+                                    aria-label="PDU inlet type"
+                                    value={pduInletType}
+                                    onChange={e => setPduInletType(e.target.value as keyof typeof CORD_BEND_CM)}
+                                    className="w-full themed-input border rounded p-2 text-sm"
+                                >
+                                    <option value="C13">C13 cord ({CORD_BEND_CM.C13} cm bend)</option>
+                                    <option value="C14">Fixed C14 inlet ({CORD_BEND_CM.C14} cm bend)</option>
+                                    <option value="C19">C19 cord ({CORD_BEND_CM.C19} cm bend)</option>
+                                    <option value="C20">Fixed C20 inlet ({CORD_BEND_CM.C20} cm bend)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="mt-2">
+                            <span className="text-[10px] themed-dim block">Placement Strategy (rear mounting rails)</span>
+                            <select
+                                aria-label="PDU placement strategy"
+                                value={placementStrategy}
+                                onChange={e => setPlacementStrategy(e.target.value as PduPlacementStrategy)}
+                                className="w-full themed-input border rounded p-2 text-sm"
+                            >
+                                <option value="bottom">Bottom band (recommended)</option>
+                                <option value="center">Center of rack</option>
+                                <option value="top">Top of rack</option>
+                            </select>
+                        </div>
+                        <div className="mt-2 text-[10px] themed-dim space-y-1" aria-live="polite">
+                            {placement.warnings.length === 0 && <div>No placement issues detected.</div>}
+                            {placement.warnings.map((w, i) => (
+                                <div key={i} className={`flex gap-1 items-start ${w.level === 'error' ? 'text-red-400' : w.level === 'warning' ? 'text-amber-400' : 'themed-muted'}`}>
+                                    <AlertTriangle size={11} className="shrink-0 mt-0.5" />
+                                    <span>{w.message}</span>
+                                </div>
+                            ))}
+                        </div>
+                        {placement.placements.length > 0 && (
+                            <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] font-mono themed-muted">
+                                {placement.placements.map(p => (
+                                    <div key={p.pduId} className="themed-input border themed-divider rounded px-1.5 py-1 flex justify-between">
+                                        <span>{p.pduId}</span>
+                                        <span title={`${(p.startMm/10).toFixed(1)}–${(p.endMm/10).toFixed(1)} cm from floor`}>U{p.uPosition - p.uSpan + 1}–{p.uPosition}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
                     <div>
                         <label className="text-xs themed-muted uppercase font-bold">Cord Length (m)</label>
@@ -1400,6 +1571,7 @@ const updateDeviceTypes = (devices: Device[]) => {
                         circuitRating={pduSpecs.amps}
                         isThreePhase={pduSpecs.isThreePhase}
                         pduCols={pduCols}
+                        placement={placement}
                      />
                  ) : (
                      <div className="themed-dim mt-20 text-center w-[600px]">No devices loaded. Upload a CSV to begin.</div>
@@ -1540,6 +1712,28 @@ const updateDeviceTypes = (devices: Device[]) => {
                           >
                               {[1,2,3,4,5,6,7,8,10,14].map(u => <option key={u} value={u}>{u}U</option>)}
                           </select>
+                      </div>
+
+                      {/* Physical dimensions (cm) — used by the PDU placement calculator */}
+                      <div className="border themed-divider rounded p-3">
+                          <div className="text-xs themed-muted uppercase font-bold mb-2">Physical Dimensions (cm)</div>
+                          <div className="grid grid-cols-3 gap-2">
+                              {(['width', 'height', 'depth'] as const).map((dim) => (
+                                  <div key={dim}>
+                                      <label className="text-[10px] themed-dim block capitalize" htmlFor={`edit-dim-${dim}`}>{dim}</label>
+                                      <input
+                                          id={`edit-dim-${dim}`}
+                                          type="number" min="0.1" step="0.1"
+                                          value={editDims[dim]}
+                                          onChange={e => setEditDims(prev => ({ ...prev, [dim]: Math.max(0.1, Number(e.target.value) || 0.1) }))}
+                                          className="w-full themed-input border themed-divider rounded p-1.5 text-sm themed-heading"
+                                      />
+                                  </div>
+                              ))}
+                          </div>
+                          <p className="text-[10px] themed-dim mt-2">
+                              If the body height exceeds its U rating, the extra space blocks rack-mount PDU slots above the device.
+                          </p>
                       </div>
 
                       <div>

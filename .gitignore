@@ -1,1 +1,4 @@
-(empty)
+node_modules/
+dist/
+build/
+.vite/

@@ -68,3 +68,70 @@ export interface OptimizationResult {
   pduPairs: PDUPair[];
   unassignedDevices: Device[];
 }
+
+// ---------- Physical dimensions & rack-mount PDU placement ----------
+
+/** Real-world physical dimensions (centimetres) for a component type. */
+export interface PhysicalDimensions {
+  width: number;   // cm
+  height: number;  // cm
+  depth: number;   // cm
+}
+
+/** Rack size catalogue: external dims + usable mounting height in U. */
+export const RACK_SIZES: Record<string, { label: string; external: PhysicalDimensions; internalU: number }> = {
+  '6U':  { label: 'Wall-mount 6U',    external: { width: 48.3, height: 35,  depth: 45 },   internalU: 6 },
+  '12U': { label: 'Floor/Wall 12U',   external: { width: 60,   height: 67,  depth: 80 },   internalU: 12 },
+  '22U': { label: 'Half-height 22U',  external: { width: 60,   height: 119, depth: 80 },   internalU: 22 },
+  '27U': { label: 'Half-height 27U',  external: { width: 60,   height: 140, depth: 80 },   internalU: 27 },
+  '42U': { label: 'Standard 42U',     external: { width: 60,   height: 200, depth: 107 },  internalU: 42 },
+  '45U': { label: 'Tall 45U',         external: { width: 60,   height: 220, depth: 107 },  internalU: 45 },
+  '47U': { label: 'Tall 47U',         external: { width: 60,   height: 225, depth: 120 },  internalU: 47 },
+  '48U': { label: 'Full-height 48U',  external: { width: 60,   height: 230, depth: 120 },  internalU: 48 },
+};
+
+/** Vertical zero-U space required above a rack-mounted PDU for its inlet cord bend. */
+export const CORD_BEND_CM: Record<'C13' | 'C14' | 'C19' | 'C20', number> = {
+  C13: 5, C14: 5, C19: 6, C20: 6,
+};
+
+export type PduPlacementStrategy = 'bottom' | 'top' | 'center';
+
+export interface PlacementInput {
+  rackSizeU: number;
+  devices: Device[];
+  pdus: PDUConfig[];
+  /** Height of one rack unit in mm (44.45 standard). */
+  uHeightMm?: number;
+  /** Mounting offset from the bottom rail to centre of U1 holes, in mm. */
+  offsetMm?: number;
+  deviceDims: Record<string, PhysicalDimensions>;
+  defaultDeviceDim: PhysicalDimensions;
+  pduVertSpaceU: number;       // 0 = auto-calculate from physical height
+  pduInletType: keyof typeof CORD_BEND_CM;
+  strategy: PduPlacementStrategy;
+}
+
+export interface PlacedPDU {
+  pduId: string;
+  side: 'A' | 'B';
+  uPosition: number;      // top-most occupied U (same convention as devices)
+  uSpan: number;          // how many U it occupies
+  startMm: number;        // bottom edge from rack floor
+  endMm: number;          // top edge from rack floor
+  centerMm: number;       // vertical centre from rack floor
+  clearanceMm: number;    // cord-bend clearance reserved above
+}
+
+export interface PlacementWarning {
+  level: 'info' | 'warning' | 'error';
+  message: string;
+}
+
+export interface PlacementResult {
+  placements: PlacedPDU[];
+  pduVertSpaceU: number;              // resolved value actually used
+  totalPduU: number;                  // U consumed by all PDUs
+  freeU: number;                      // remaining usable U for devices
+  warnings: PlacementWarning[];
+}
